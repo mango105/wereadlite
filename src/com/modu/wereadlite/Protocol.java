@@ -1,0 +1,460 @@
+package com.modu.wereadlite;
+
+import java.io.ByteArrayOutputStream;
+import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Random;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * 微信读书 Web 协议：摘要、_e() 混淆、请求签名、章节分片解码。
+ * 算法与 KOReader 插件 finlater/weread.koplugin、觅阅 MiuRead 的实现逐位一致。
+ */
+public final class Protocol {
+
+    public static final String UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            + "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36";
+    public static final String BASE = "https://weread.qq.com";
+    /** reader 页面取不到 token 时的兜底值。 */
+    public static final String READER_TOKEN = "3c5c8717f3daf09iop3423zafeqoi";
+
+    private static final char[] B64 =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".toCharArray();
+    private static final Random RAND = new Random();
+
+    private Protocol() {
+    }
+
+    // ---------- 摘要 ----------
+
+    public static byte[] digest(String alg, byte[] data) {
+        try {
+            return MessageDigest.getInstance(alg).digest(data);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public static String hex(byte[] data) {
+        StringBuilder sb = new StringBuilder(data.length * 2);
+        for (byte b : data) {
+            sb.append(Character.forDigit((b >> 4) & 0xf, 16));
+            sb.append(Character.forDigit(b & 0xf, 16));
+        }
+        return sb.toString();
+    }
+
+    public static String md5hex(byte[] data) {
+        return hex(digest("MD5", data));
+    }
+
+    public static String md5hex(String s) {
+        return md5hex(utf8(s));
+    }
+
+    public static String sha256hex(String s) {
+        return hex(digest("SHA-256", utf8(s)));
+    }
+
+    public static byte[] utf8(String s) {
+        try {
+            return s.getBytes("UTF-8");
+        } catch (Exception e) {
+            return s.getBytes();
+        }
+    }
+
+    // ---------- _e() ----------
+
+    /** 微信读书的 _e()：数字走 9 位分块，字符串走逐字节 hex。 */
+    public static String obf(Object value) {
+        String s = String.valueOf(value);
+        String d = md5hex(s);
+        List<String> chunks = new ArrayList<String>();
+        String kind;
+        boolean digits = s.length() > 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < '0' || c > '9') {
+                digits = false;
+                break;
+            }
+        }
+        if (digits) {
+            kind = "3";
+            for (int i = 0; i < s.length(); i += 9) {
+                String part = s.substring(i, Math.min(i + 9, s.length()));
+                chunks.add(Long.toString(Long.parseLong(part), 16));
+            }
+        } else {
+            kind = "4";
+            StringBuilder sb = new StringBuilder();
+            for (byte b : utf8(s)) {
+                sb.append(Integer.toHexString(b & 0xff));
+            }
+            chunks.add(sb.toString());
+        }
+        StringBuilder out = new StringBuilder();
+        out.append(d, 0, 3).append(kind).append('2').append(d.substring(d.length() - 2));
+        for (int i = 0; i < chunks.size(); i++) {
+            String c = chunks.get(i);
+            out.append(String.format(Locale.US, "%02x", c.length())).append(c);
+            if (i < chunks.size() - 1) out.append('g');
+        }
+        if (out.length() < 20) out.append(d, 0, 20 - out.length());
+        out.append(md5hex(out.toString()), 0, 3);
+        return out.toString();
+    }
+
+    // ---------- 签名 ----------
+
+    public static String encode(String v) {
+        StringBuilder sb = new StringBuilder();
+        for (byte b : utf8(v)) {
+            int c = b & 0xff;
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+                    || c == '-' || c == '_' || c == '.' || c == '~') {
+                sb.append((char) c);
+            } else {
+                sb.append('%').append(Character.toUpperCase(Character.forDigit(c >> 4, 16)))
+                        .append(Character.toUpperCase(Character.forDigit(c & 0xf, 16)));
+            }
+        }
+        return sb.toString();
+    }
+
+    /** 按 key 字典序拼接（不含 s），再做 0x15051505 双向位运算。 */
+    public static String sign(Map<String, ?> params) {
+        List<String> keys = new ArrayList<String>();
+        for (String k : params.keySet()) {
+            if (!"s".equals(k)) keys.add(k);
+        }
+        Collections.sort(keys);
+        StringBuilder q = new StringBuilder();
+        for (int i = 0; i < keys.size(); i++) {
+            if (i > 0) q.append('&');
+            q.append(keys.get(i)).append('=').append(encode(scalar(params.get(keys.get(i)))));
+        }
+        return webSign(q.toString());
+    }
+
+    private static String scalar(Object v) {
+        if (v == null) return "null";
+        if (v instanceof Boolean) return ((Boolean) v) ? "true" : "false";
+        return String.valueOf(v);
+    }
+
+    public static String webSign(String q) {
+        byte[] b = utf8(q);
+        int n = b.length;
+        int a = 0x15051505;
+        int c = 0x15051505;
+        int i = n;
+        while (i > 1) {
+            a = (a ^ ((b[i - 1] & 0xff) << ((n - i + 1) % 30))) & 0x7fffffff;
+            c = (c ^ ((b[i - 2] & 0xff) << ((i - 1) % 30))) & 0x7fffffff;
+            i -= 2;
+        }
+        long sum = (a & 0xffffffffL) + (c & 0xffffffffL);
+        return Long.toHexString(sum);
+    }
+
+    public static String readerUrl(String bookId, String chapterUid) {
+        String u = BASE + "/web/reader/" + obf(bookId);
+        if (chapterUid != null) u = u + "k" + obf(chapterUid);
+        return u;
+    }
+
+    // ---------- 章节分片 ----------
+
+    /** 分片体：前 32 字符是剩余内容的 MD5。 */
+    public static String shardBody(String raw) {
+        if (raw == null || raw.length() <= 32) return "";
+        String sum = raw.substring(0, 32);
+        String body = raw.substring(32);
+        if (!md5hex(body).equalsIgnoreCase(sum)) {
+            throw new IllegalStateException("chapter checksum mismatch");
+        }
+        return body;
+    }
+
+    public static String decodeParts(String[] parts) {
+        StringBuilder all = new StringBuilder();
+        if (parts != null) {
+            for (String p : parts) all.append(shardBody(p));
+        }
+        String s = all.toString();
+        if (s.length() == 0) return "";
+        s = s.substring(1);
+        int[] pos = positions(s);
+        char[] c = s.toCharArray();
+        for (int i = pos.length - 1; i >= 1; i -= 2) {
+            int a = pos[i] + 1;
+            int b = pos[i - 1] + 1;
+            char t = c[a];
+            c[a] = c[b];
+            c[b] = t;
+            a--;
+            b--;
+            t = c[a];
+            c[a] = c[b];
+            c[b] = t;
+        }
+        return utf8Decode(b64decode(new String(c)));
+    }
+
+    static int[] positions(String s) {
+        int n = s.length();
+        if (n < 4) return new int[0];
+        if (n < 11) return new int[]{0, 2};
+        int take = Math.min(4, (n + 9) / 10);
+        StringBuilder pieces = new StringBuilder();
+        for (int i = n; i >= n - take + 1; i--) {
+            // 尾字符取二进制串，再把这个串按 4 进制解析（与 Lua tonumber(bin,4) 一致）
+            pieces.append(Long.toString(Long.parseLong(Integer.toBinaryString(s.charAt(i - 1)), 4)));
+        }
+        String t = pieces.toString();
+        int mod = n - take - 2;
+        int step = String.valueOf(mod).length();
+        List<Integer> out = new ArrayList<Integer>();
+        int i = 1;
+        while (out.size() < 10 && i + step - 1 < t.length()) {
+            out.add(parse(t.substring(i - 1, i - 1 + step)) % mod);
+            if (i + 1 <= t.length()) {
+                out.add(parse(t.substring(i, Math.min(i + step, t.length()))) % mod);
+            }
+            i += step;
+        }
+        int[] r = new int[out.size()];
+        for (int k = 0; k < r.length; k++) r[k] = out.get(k);
+        return r;
+    }
+
+    private static int parse(String v) {
+        try {
+            return Integer.parseInt(v);
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    static byte[] b64decode(String data) {
+        StringBuilder clean = new StringBuilder();
+        for (int i = 0; i < data.length(); i++) {
+            char ch = data.charAt(i);
+            if (ch == '-') ch = '+';
+            else if (ch == '_') ch = '/';
+            if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')
+                    || ch == '+' || ch == '/' || ch == '=') {
+                clean.append(ch);
+            }
+        }
+        int pad = clean.length() % 4;
+        if (pad != 0) {
+            for (int i = 0; i < 4 - pad; i++) clean.append('=');
+        }
+        String s = clean.toString();
+        ByteArrayOutputStream out = new ByteArrayOutputStream(s.length());
+        for (int i = 0; i < s.length(); i += 4) {
+            int n = (val(s.charAt(i)) << 18) | (val(s.charAt(i + 1)) << 12)
+                    | (val(s.charAt(i + 2)) << 6) | val(s.charAt(i + 3));
+            out.write((n >> 16) & 0xff);
+            if (s.charAt(i + 2) != '=') out.write((n >> 8) & 0xff);
+            if (s.charAt(i + 3) != '=') out.write(n & 0xff);
+        }
+        return out.toByteArray();
+    }
+
+    private static int val(char ch) {
+        if (ch == '=') return 0;
+        for (int i = 0; i < B64.length; i++) {
+            if (B64[i] == ch) return i;
+        }
+        return 0;
+    }
+
+    static String utf8Decode(byte[] data) {
+        try {
+            return new String(data, "UTF-8");
+        } catch (Exception e) {
+            return new String(data);
+        }
+    }
+
+    // ---------- XHTML -> 纯文本 ----------
+
+    public static String htmlToText(String html) {
+        if (html == null) return "";
+        String s = html.replaceAll("(?is)<(script|style)[^>]*>.*?</\\1>", " ");
+        s = s.replaceAll("(?i)<\\s*br\\s*/?>", "\n");
+        s = s.replaceAll("(?i)</\\s*(p|div|h[1-6]|li|tr|blockquote|section)\\s*>", "\n");
+        s = s.replaceAll("(?i)<\\s*(p|div|h[1-6]|li|tr|blockquote|section)[^>]*>", "\n");
+        s = s.replaceAll("<[^>]*>", "");
+        s = s.replace("&nbsp;", " ").replace("&ldquo;", "\u201c").replace("&rdquo;", "\u201d")
+                .replace("&hellip;", "\u2026").replace("&mdash;", "\u2014")
+                .replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+                .replace("&quot;", "\"").replace("&apos;", "'");
+        s = decodeNumeric(s).replaceAll("&[a-zA-Z]+;", "");
+        StringBuilder out = new StringBuilder(s.length());
+        boolean lastBlank = true;
+        for (String line : s.split("\n")) {
+            String t = line.trim().replace('\u00a0', ' ');
+            if (t.length() == 0) {
+                if (!lastBlank) {
+                    out.append('\n');
+                    lastBlank = true;
+                }
+            } else {
+                if (out.length() > 0 && !lastBlank) out.append('\n');
+                out.append(t);
+                lastBlank = false;
+            }
+        }
+        return out.toString().trim();
+    }
+
+    private static final Pattern NUMERIC = Pattern.compile("&#(x?)([0-9A-Fa-f]+);");
+
+    /** 数字实体（&#10; / &#x4e2d;）必须还原成字符，否则正文里会冒出「10」「4e2d」这种数字。 */
+    private static String decodeNumeric(String s) {
+        Matcher m = NUMERIC.matcher(s);
+        StringBuffer sb = new StringBuffer();
+        while (m.find()) {
+            String rep = "";
+            try {
+                int cp = Integer.parseInt(m.group(2), m.group(1).length() > 0 ? 16 : 10);
+                if (cp > 0 && cp <= 0xFFFF) rep = String.valueOf((char) cp);
+            } catch (Exception ignored) {
+            }
+            m.appendReplacement(sb, Matcher.quoteReplacement(rep));
+        }
+        m.appendTail(sb);
+        return sb.toString();
+    }
+
+    // ---------- 进度上报 ----------
+
+    public static String appId(String ua) {
+        String[] parts = ua.trim().split("\\s+");
+        StringBuilder prefix = new StringBuilder();
+        for (int i = 0; i < parts.length && i < 12; i++) {
+            prefix.append(parts[i].length() % 10);
+        }
+        int h = 0;
+        for (byte b : utf8(ua)) {
+            h = (131 * h + (b & 0xff)) & 0x7fffffff;
+        }
+        return "wb" + prefix + "h" + h;
+    }
+
+    public static int rand(int max) {
+        return RAND.nextInt(max + 1);
+    }
+
+    private static long square(int v) {
+        return (long) v * v;
+    }
+
+    public static Map<String, String> contentFields(String bookId, String chapterUid,
+                                                    String psvts, boolean style) {
+        long now = System.currentTimeMillis() / 1000L;
+        if (obf(now).equals(String.valueOf(psvts))) now++;
+        Map<String, String> m = new LinkedHashMap<String, String>();
+        m.put("b", obf(bookId));
+        m.put("c", obf(chapterUid));
+        m.put("r", String.valueOf(square(rand(9999))));
+        m.put("ct", String.valueOf(now));
+        m.put("ps", psvts == null ? "" : psvts);
+        m.put("pc", obf(now));
+        m.put("sc", "1");
+        m.put("prevChapter", "false");
+        m.put("st", style ? "1" : "0");
+        m.put("s", sign(m));
+        return m;
+    }
+
+    public static Map<String, String> readFields(String bookId, String chapterUid, int chapterIndex,
+                                                 int offset, int progress, int elapsed,
+                                                 String summary, String psvts, String pclts,
+                                                 String token, String appId) {
+        long now = System.currentTimeMillis() / 1000L;
+        long ts = now * 1000L + rand(999);
+        int rn = rand(999);
+        String tk = (token == null || token.length() == 0) ? READER_TOKEN : token;
+        String ps = psvts == null ? "" : psvts;
+        // 阅读页里的 pclts 实测就是数字 0；照原样上报服务端只会回 {} 并丢弃进度，
+        // 必须和网页端一样在缺省时改用 _e(ct)。
+        String pc = (pclts == null || pclts.length() == 0 || "0".equals(pclts)) ? obf(now) : pclts;
+        String sg = sha256hex(String.valueOf(ts) + rn + tk);
+        Map<String, String> m = new LinkedHashMap<String, String>();
+        m.put("appId", appId);
+        m.put("b", obf(bookId));
+        m.put("c", obf(chapterUid));
+        m.put("ci", String.valueOf(chapterIndex));
+        m.put("co", String.valueOf(offset));
+        m.put("sm", summary == null ? "" : (summary.length() > 20 ? summary.substring(0, 20) : summary));
+        m.put("pr", String.valueOf(progress));
+        m.put("rt", String.valueOf(elapsed));
+        m.put("ts", String.valueOf(ts));
+        m.put("rn", String.valueOf(rn));
+        m.put("sg", sg);
+        m.put("ct", String.valueOf(now));
+        m.put("ps", ps);
+        m.put("pc", pc);
+        m.put("s", sign(m));
+        return m;
+    }
+
+    // ---------- 请求体（类型必须与网页端一致：数字/布尔不能包成字符串） ----------
+
+    /** 章节分片请求体：sc/st 为数字，prevChapter 为布尔。 */
+    public static String contentJson(Map<String, String> f) {
+        StringBuilder sb = new StringBuilder("{");
+        sb.append(kv("b", f.get("b"))).append(',')
+                .append(kv("c", f.get("c"))).append(',')
+                .append(kv("r", f.get("r"))).append(',')
+                .append(kv("ct", f.get("ct"))).append(',')
+                .append(kv("ps", f.get("ps"))).append(',')
+                .append(kv("pc", f.get("pc"))).append(',')
+                .append(kn("sc", "1")).append(',')
+                .append(kn("prevChapter", "false")).append(',')
+                .append(kn("st", f.get("st"))).append(',')
+                .append(kv("s", f.get("s")));
+        return sb.append('}').toString();
+    }
+
+    /** 进度上报体：ci/co/pr/rt/rn/ct 为数字，ts 与签名类字段为字符串。 */
+    public static String readJson(Map<String, String> f) {
+        StringBuilder sb = new StringBuilder("{");
+        sb.append(kv("appId", f.get("appId"))).append(',')
+                .append(kv("b", f.get("b"))).append(',')
+                .append(kv("c", f.get("c"))).append(',')
+                .append(kn("ci", f.get("ci"))).append(',')
+                .append(kn("co", f.get("co"))).append(',')
+                .append(kv("sm", f.get("sm"))).append(',')
+                .append(kn("pr", f.get("pr"))).append(',')
+                .append(kn("rt", f.get("rt"))).append(',')
+                .append(kv("ts", f.get("ts"))).append(',')
+                .append(kn("rn", f.get("rn"))).append(',')
+                .append(kv("sg", f.get("sg"))).append(',')
+                .append(kn("ct", f.get("ct"))).append(',')
+                .append(kv("ps", f.get("ps"))).append(',')
+                .append(kv("pc", f.get("pc"))).append(',')
+                .append(kv("s", f.get("s")));
+        return sb.append('}').toString();
+    }
+
+    private static String kv(String k, String v) {
+        return Json.quote(k) + ":" + Json.quote(v == null ? "" : v);
+    }
+
+    private static String kn(String k, String v) {
+        return Json.quote(k) + ":" + (v == null || v.length() == 0 ? "0" : v);
+    }
+}

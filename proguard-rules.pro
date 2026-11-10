@@ -1,0 +1,7 @@
+-keep public class * extends android.app.Activity { *; }
+-keep public class * extends android.view.View { *; }
+-keepclassmembers class * implements android.view.View$OnClickListener { public void onClick(android.view.View); }
+-dontwarn **
+-dontoptimize
+-keepclassmembers enum * { public static **[] values(); public static ** valueOf(java.lang.String); }
+-keepclassmembers enum * { public static **[] values(); public static ** valueOf(java.lang.String); }

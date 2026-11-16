@@ -32,6 +32,7 @@ final class NavIcon extends View {
     static final int PROGRESS = 19;
     static final int LETTER_A = 20;
     static final int INFO = 21;
+    static final int BOOKMARK = 22;
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path path = new Path();
@@ -255,6 +256,16 @@ final class NavIcon extends View {
                 canvas.drawLine(8.4f, 8.4f, 15.6f, 8.4f, paint);
                 canvas.drawLine(8.4f, 12f, 15.6f, 12f, paint);
                 canvas.drawLine(8.4f, 15.6f, 13f, 15.6f, paint);
+                break;
+            case BOOKMARK:
+                // 上方丝带 + 底部 V 形缺口，一眼能和「目录」区分
+                path.moveTo(6.2f, 3.8f);
+                path.lineTo(17.8f, 3.8f);
+                path.lineTo(17.8f, 20.2f);
+                path.lineTo(12f, 15.4f);
+                path.lineTo(6.2f, 20.2f);
+                path.close();
+                canvas.drawPath(path, paint);
                 break;
             default:
                 break;

@@ -84,6 +84,9 @@ public class MainActivity extends Activity {
     private boolean loading;
     private boolean shelfLoaded;
     private boolean demo;
+    /** 未登录的离线模式：只显示本地导入的书，不去拉云端书架。 */
+    private boolean offline;
+    private String pendingExport;
     private int tab = TAB_SHELF;
 
     private static final int TAB_DISCOVER = 0;
@@ -101,7 +104,8 @@ public class MainActivity extends Activity {
         api = new Api(store);
         Covers.init(this, api.compat());
         demo = Demo.enabled(getIntent());
-        if (!api.loggedIn() && !demo) {
+        offline = getIntent() != null && getIntent().getBooleanExtra("offline", false);
+        if (!api.loggedIn() && !demo && !offline) {
             startActivity(new Intent(this, LoginActivity.class));
             finish();
             return;
@@ -690,10 +694,36 @@ public class MainActivity extends Activity {
         meRows.addView(meRow("同步书架", syncedText(), new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                if (offline && !api.loggedIn()) {
+                    toast("还没登录，先点下面的「登录微信读书」");
+                    return;
+                }
                 loadShelf(false);
                 toast("正在同步书架…");
             }
         }));
+        meRows.addView(meRow("导出书签", store.bookmarkCount() + " 条",
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        exportBookmarks();
+                    }
+                }));
+        meRows.addView(meRow("导入书签", "合并，不覆盖", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                pickBookmarkImport();
+            }
+        }));
+        if (offline && !api.loggedIn()) {
+            meRows.addView(meRow("登录微信读书", "同步云端书架", new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    startActivity(new Intent(MainActivity.this, LoginActivity.class));
+                    finish();
+                }
+            }));
+        }
         meRows.addView(meRow("云端功能授权", Eink.load(store).ok() ? "已授权" : "未授权",
                 new View.OnClickListener() {
                     @Override
@@ -938,6 +968,13 @@ public class MainActivity extends Activity {
 
     private void loadShelf(final boolean silent) {
         if (loading) return;
+        // 未登录的离线模式：只摆本地导入的书，不发网络请求，也不会误弹「登录过期」
+        if (offline && !api.loggedIn()) {
+            mergeLocal();
+            rebuildGrid();
+            if (books.isEmpty()) toast("点右上角「导入」读本地 TXT / EPUB");
+            return;
+        }
         loading = true;
         if (!silent) {
             // 先把本地导入的书摆出来：云端拉不动也不该让用户以为书没了
@@ -1355,10 +1392,153 @@ public class MainActivity extends Activity {
     private static final int REQ_EINK = 0x51;
     private static final int REQ_IMPORT = 0x52;
     private static final int REQ_PICK = 0x53;
+    private static final int REQ_EXPORT_BM = 0x54;
+    private static final int REQ_IMPORT_BM = 0x55;
 
     /** 选一个 TXT / EPUB 导入书架。用自带的文件浏览器，墨水屏 ROM 多数没装 DocumentsUI。 */
     private void pickBook() {
         startActivityForResult(new Intent(this, LocalPickerActivity.class), REQ_PICK);
+    }
+
+    // ---------------- 书签导出 / 导入 ----------------
+
+    /**
+     * 跨设备同步书签：导出成一个 JSON 文件，另一台设备导入时按「章节 + 偏移」合并，
+     * 不会覆盖本地已有的书签。走系统文件选择器，不需要任何存储权限。
+     */
+    private void exportBookmarks() {
+        final String json = Bookmarks.exportAll(store.allBookmarks());
+        if (Bookmarks.parseAll(json).isEmpty()) {
+            toast("还没有书签可以导出");
+            return;
+        }
+        // 先落一份到应用专属目录：这个目录任何 Android 版本都能写、不需要权限，
+        // 系统没有文件管理器时也能用数据线取走。
+        File dir = getExternalFilesDir(null);
+        if (dir == null) dir = getFilesDir();
+        File local = new File(dir, "wereadlite-bookmarks.json");
+        boolean ok = writeText(local, json);
+        pendingExport = json;
+        try {
+            Intent i = new Intent("android.intent.action.CREATE_DOCUMENT");
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("application/json");
+            i.putExtra("android.intent.extra.TITLE", "wereadlite-bookmarks.json");
+            startActivityForResult(i, REQ_EXPORT_BM);
+            toast("选择保存位置" + (ok ? "；也可数据线取 " + local.getAbsolutePath() : ""));
+        } catch (Exception e) {
+            pendingExport = null;
+            toast(ok ? "系统没有文件管理器，已导出到 " + local.getAbsolutePath()
+                    : "系统没有文件管理器，无法导出");
+        }
+    }
+
+    private void pickBookmarkImport() {
+        Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        try {
+            startActivityForResult(Intent.createChooser(i, "选择书签 JSON"), REQ_IMPORT_BM);
+        } catch (Exception e) {
+            toast("系统没有文件管理器，请把书签文件放到应用专属目录再试");
+        }
+    }
+
+    private void writeBookmarksTo(android.net.Uri uri) {
+        String json = pendingExport;
+        pendingExport = null;
+        if (json == null || json.length() == 0) json = Bookmarks.exportAll(store.allBookmarks());
+        java.io.OutputStream out = null;
+        try {
+            out = getContentResolver().openOutputStream(uri);
+            if (out == null) throw new java.io.IOException("打不开目标文件");
+            out.write(json.getBytes("UTF-8"));
+            toast("书签已导出");
+        } catch (Exception e) {
+            toast("导出失败：" + e.getMessage());
+        } finally {
+            if (out != null) try {
+                out.close();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private void importBookmarksFrom(final android.net.Uri uri) {
+        toast("正在导入书签…");
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                String text = null;
+                String err = null;
+                java.io.InputStream in = null;
+                try {
+                    in = getContentResolver().openInputStream(uri);
+                    if (in == null) throw new java.io.IOException("打不开文件");
+                    java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+                    byte[] chunk = new byte[8192];
+                    int n;
+                    while ((n = in.read(chunk)) > 0) buf.write(chunk, 0, n);
+                    text = new String(buf.toByteArray(), "UTF-8");
+                } catch (Exception e) {
+                    err = e.getMessage() == null ? e.toString() : e.getMessage();
+                } finally {
+                    if (in != null) try {
+                        in.close();
+                    } catch (Exception ignored) {
+                    }
+                }
+                int added = 0;
+                int booksN = 0;
+                String fail = err;
+                if (text != null) {
+                    java.util.Map<String, String> incoming = Bookmarks.parseAll(text);
+                    java.util.Map<String, String> merged =
+                            new java.util.LinkedHashMap<String, String>();
+                    for (java.util.Map.Entry<String, String> e : incoming.entrySet()) {
+                        java.util.List<Bookmarks.Item> local =
+                                Bookmarks.decode(store.bookmarks(e.getKey()));
+                        java.util.List<Bookmarks.Item> all =
+                                Bookmarks.merge(local, Bookmarks.decode(e.getValue()));
+                        merged.put(e.getKey(), Bookmarks.encode(all));
+                        added += all.size() - local.size();
+                        booksN++;
+                    }
+                    if (!merged.isEmpty()) store.setAllBookmarks(merged);
+                    fail = booksN == 0 ? "文件里没有读到书签" : null;
+                }
+                final int addedN = added;
+                final int booksCount = booksN;
+                final String errMsg = fail;
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (errMsg != null) {
+                            toast("导入失败：" + errMsg);
+                            return;
+                        }
+                        refreshMeRows();
+                        toast("已合并 " + booksCount + " 本书的书签，新增 " + addedN + " 条");
+                    }
+                });
+            }
+        }).start();
+    }
+
+    private static boolean writeText(File f, String text) {
+        java.io.Writer w = null;
+        try {
+            w = new java.io.OutputStreamWriter(new java.io.FileOutputStream(f), "UTF-8");
+            w.write(text);
+            return true;
+        } catch (Exception e) {
+            return false;
+        } finally {
+            if (w != null) try {
+                w.close();
+            } catch (Exception ignored) {
+            }
+        }
     }
 
     private void doImportPath(final String path) {
@@ -1524,6 +1704,11 @@ public class MainActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQ_PICK && resultCode == RESULT_OK && data != null) {
+            // 自带选择器里改用系统文件管理器时，回来的是 content:// Uri
+            if (data.getData() != null) {
+                doImport(data.getData());
+                return;
+            }
             String dir = data.getStringExtra("dir");
             if (dir != null && dir.length() > 0) {
                 doImportDir(dir);
@@ -1536,6 +1721,16 @@ public class MainActivity extends Activity {
         if (requestCode == REQ_IMPORT && resultCode == RESULT_OK && data != null
                 && data.getData() != null) {
             doImport(data.getData());
+            return;
+        }
+        if (requestCode == REQ_EXPORT_BM && resultCode == RESULT_OK && data != null
+                && data.getData() != null) {
+            writeBookmarksTo(data.getData());
+            return;
+        }
+        if (requestCode == REQ_IMPORT_BM && resultCode == RESULT_OK && data != null
+                && data.getData() != null) {
+            importBookmarksFrom(data.getData());
             return;
         }
         if (requestCode == REQ_EINK && resultCode == RESULT_OK) {

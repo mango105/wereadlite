@@ -32,6 +32,7 @@ public class SelfTest {
         testReviewRows();
         testTxt();
         testEpub();
+        testBookmarks();
         System.out.println("---- " + passed + " passed, " + failed + " failed");
         if (failed > 0) System.exit(1);
     }
@@ -81,6 +82,65 @@ public class SelfTest {
         Method m = c.getDeclaredMethod(method, arg.getClass());
         m.setAccessible(true);
         return m.invoke(null, arg);
+    }
+
+    // ---------- 书签 ----------
+
+    static void testBookmarks() {
+        Bookmarks.Item a = new Bookmarks.Item("u1", "第一章", 0, 120, "开头第一句", 1000L);
+        Bookmarks.Item b = new Bookmarks.Item("u2", "第二章", 1, 30, "引号\"与换行\n都在", 2000L);
+        java.util.List<Bookmarks.Item> items = new java.util.ArrayList<Bookmarks.Item>();
+        items.add(a);
+        items.add(b);
+        String json = Bookmarks.encode(items);
+        java.util.List<Bookmarks.Item> back = Bookmarks.decode(json);
+        eq("书签往返条数", back.size(), 2);
+        eq("书签往返 uid", back.get(0).uid, "u1");
+        eq("书签往返偏移", back.get(0).off, 120);
+        eq("书签往返时间", back.get(0).at, 1000L);
+        eq("书签往返转义", back.get(1).excerpt, "引号\"与换行\n都在");
+        eq("书签往返章节", back.get(1).chapter, "第二章");
+
+        // 同一位置容差内去重，保留较新的摘录；不同章的书签照收
+        java.util.List<Bookmarks.Item> local = new java.util.ArrayList<Bookmarks.Item>();
+        local.add(new Bookmarks.Item("u1", "第一章", 0, 120, "旧摘录", 1000L));
+        java.util.List<Bookmarks.Item> incoming = new java.util.ArrayList<Bookmarks.Item>();
+        incoming.add(new Bookmarks.Item("u1", "第一章", 0, 128, "新摘录", 3000L));
+        incoming.add(new Bookmarks.Item("u3", "第三章", 2, 10, "另一台设备", 4000L));
+        java.util.List<Bookmarks.Item> merged = Bookmarks.merge(local, incoming);
+        eq("合并去重后条数", merged.size(), 2);
+        eq("合并保留较新摘录", merged.get(0).excerpt, "新摘录");
+        eq("合并按章排序", merged.get(1).uid, "u3");
+
+        java.util.List<Bookmarks.Item> far = new java.util.ArrayList<Bookmarks.Item>();
+        far.add(new Bookmarks.Item("u1", "第一章", 0, 900, "", 1L));
+        eq("容差外不去重", Bookmarks.merge(local, far).size(), 2);
+
+        java.util.List<Bookmarks.Item> many = new java.util.ArrayList<Bookmarks.Item>();
+        for (int i = 0; i < Bookmarks.MAX_PER_BOOK + 20; i++) {
+            many.add(new Bookmarks.Item("u", "", 0, i * 100, "", i));
+        }
+        eq("书签上限", Bookmarks.merge(null, many).size(), Bookmarks.MAX_PER_BOOK);
+
+        // 全量导出/导入：bookId 里带中文和引号也不能坏
+        java.util.Map<String, String> one = new java.util.LinkedHashMap<String, String>();
+        one.put("书\"A", json);
+        String dump = Bookmarks.exportAll(one);
+        java.util.Map<String, String> parsed = Bookmarks.parseAll(dump);
+        eq("导出导入书本数", parsed.size(), 1);
+        eq("导出导入后条数", Bookmarks.decode(parsed.get("书\"A")).size(), 2);
+        eq("坏数据不崩", Bookmarks.parseAll("不是 json").size(), 0);
+        eq("空数据不崩", Bookmarks.decode("").size(), 0);
+
+        java.util.List<Bookmarks.Item> t = new java.util.ArrayList<Bookmarks.Item>();
+        yes("首次加书签", Bookmarks.toggle(t, a));
+        eq("加完条数", t.size(), 1);
+        yes("同位置再点是取消", !Bookmarks.toggle(t,
+                new Bookmarks.Item("u1", "", 0, 130, "", 1L)));
+        eq("取消后条数", t.size(), 0);
+
+        eq("摘录压平空白", Bookmarks.excerptOf("第一段\n\n  第二段\t第三段", 0), "第一段 第二段 第三段");
+        eq("摘录越界不崩", Bookmarks.excerptOf("短", 999), "");
     }
 
     // ---------- Json ----------

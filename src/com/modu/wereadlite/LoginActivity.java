@@ -123,6 +123,25 @@ public class LoginActivity extends Activity {
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         rp.topMargin = dp(18);
         root.addView(refresh, rp);
+
+        // 不登录也能读本地 TXT / EPUB：书架页的「导入」不该被登录挡住
+        Button skip = new Button(this);
+        skip.setText("跳过登录，先读本地书");
+        styleButton(skip);
+        skip.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                stopPolling();
+                Intent i = new Intent(LoginActivity.this, MainActivity.class);
+                i.putExtra("offline", true);
+                startActivity(i);
+                finish();
+            }
+        });
+        LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        sp.topMargin = dp(10);
+        root.addView(skip, sp);
         return root;
     }
 

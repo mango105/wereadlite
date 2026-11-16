@@ -205,6 +205,49 @@ public final class Store {
         sp.edit().putLong("syncedAt", v).commit();
     }
 
+    // ---------------- 书签 ----------------
+
+    /** 每本书的书签，Bookmarks.encode 出来的 JSON 数组。 */
+    public String bookmarks(String bookId) {
+        return get("bm_" + bookId);
+    }
+
+    public void setBookmarks(String bookId, String json) {
+        put("bm_" + bookId, json);
+    }
+
+    /** 全量枚举：bookId -> 该书书签 JSON，导出时用。 */
+    public java.util.Map<String, String> allBookmarks() {
+        java.util.Map<String, String> out = new java.util.LinkedHashMap<String, String>();
+        for (java.util.Map.Entry<String, ?> e : sp.getAll().entrySet()) {
+            String k = e.getKey();
+            if (!k.startsWith("bm_") || !(e.getValue() instanceof String)) continue;
+            String v = (String) e.getValue();
+            if (v.length() > 0) out.put(k.substring(3), v);
+        }
+        return out;
+    }
+
+    /** 导入时一次写多本，合并成一个编辑器。 */
+    public void setAllBookmarks(java.util.Map<String, String> byBook) {
+        if (byBook == null || byBook.isEmpty()) return;
+        SharedPreferences.Editor ed = sp.edit();
+        for (java.util.Map.Entry<String, String> e : byBook.entrySet()) {
+            String v = e.getValue();
+            if (v != null) ed.putString("bm_" + e.getKey(), v);
+        }
+        ed.commit();
+    }
+
+    /** 「我」页显示的总条数。 */
+    public int bookmarkCount() {
+        int n = 0;
+        for (java.util.Map.Entry<String, String> e : allBookmarks().entrySet()) {
+            n += Bookmarks.decode(e.getValue()).size();
+        }
+        return n;
+    }
+
     /** 每本书的累计阅读秒数，来自书架同步里的 bookProgress；没同步到过就是 -1。 */
     public int readTime(String bookId) {
         return sp.getInt("rt_" + bookId, -1);

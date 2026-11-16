@@ -25,6 +25,7 @@ import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -62,6 +63,14 @@ public class ReaderActivity extends Activity implements PageView.Callback {
     private TextView lineValue;
     private TextView indentValue;
     private TocAdapter tocAdapter;
+    private BookmarkAdapter bookmarkAdapter;
+    private ListView markList;
+    private TextView markEmpty;
+    private TextView tocTab;
+    private TextView bookmarkTab;
+    /** 目录抽屉当前显示目录还是书签。 */
+    private boolean bookmarkMode;
+    private final List<Bookmarks.Item> marks = new ArrayList<Bookmarks.Item>();
 
     private String bookId;
     private String bookTitle = "";
@@ -258,6 +267,12 @@ public class ReaderActivity extends Activity implements PageView.Callback {
             @Override
             public void onClick(View v) {
                 showToc(true);
+            }
+        }), slot());
+        bar.addView(barButton(NavIcon.BOOKMARK, "加/取消书签", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                toggleBookmark();
             }
         }), slot());
         bar.addView(barButton(NavIcon.THOUGHT, "书友想法", new View.OnClickListener() {
@@ -716,8 +731,6 @@ public class ReaderActivity extends Activity implements PageView.Callback {
 
         loadTocCover();
 
-        loadTocCover();
-
         tocList = new ListView(this);
         tocList.setBackgroundColor(Color.WHITE);
         tocList.setDivider(null);
@@ -727,6 +740,25 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         tocList.setAdapter(tocAdapter);
         panel.addView(tocList, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        // 书签用独立 ListView，避免和目录行共用 convertView 复用池导致 tag 串味
+        markList = new ListView(this);
+        markList.setBackgroundColor(Color.WHITE);
+        markList.setDivider(null);
+        markList.setCacheColorHint(Color.WHITE);
+        markList.setVerticalScrollBarEnabled(false);
+        bookmarkAdapter = new BookmarkAdapter();
+        markList.setAdapter(bookmarkAdapter);
+        markList.setVisibility(View.GONE);
+        panel.addView(markList, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        markEmpty = Ui.text(this, "还没有书签\n\n读到这里时点底栏的书签图标就能记下来", 13f, Ui.LIGHT);
+        markEmpty.setGravity(Gravity.CENTER);
+        markEmpty.setPadding(dp(24), dp(36), dp(24), dp(36));
+        markEmpty.setVisibility(View.GONE);
+        panel.addView(markEmpty, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         View line2 = new View(this);
         line2.setBackgroundColor(Ui.LINE);
@@ -738,8 +770,27 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         bottom.setGravity(Gravity.CENTER_VERTICAL);
         bottom.setPadding(dp(16), 0, dp(16), 0);
 
-        TextView tab = Ui.text(this, "目录", 13.5f, Ui.INK);
-        bottom.addView(tab, new LinearLayout.LayoutParams(0,
+        tocTab = Ui.text(this, "目录", 13.5f, Ui.INK);
+        tocTab.setGravity(Gravity.CENTER);
+        tocTab.setPadding(dp(6), dp(10), dp(6), dp(10));
+        tocTab.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                setBookmarkMode(false);
+            }
+        });
+        bottom.addView(tocTab, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        bookmarkTab = Ui.text(this, "书签", 13.5f, Ui.LIGHT);
+        bookmarkTab.setGravity(Gravity.CENTER);
+        bookmarkTab.setPadding(dp(6), dp(10), dp(6), dp(10));
+        bookmarkTab.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                setBookmarkMode(true);
+            }
+        });
+        bottom.addView(bookmarkTab, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         TextView close = flatButton("关闭", 13, Ui.SUB);
         close.setOnClickListener(new View.OnClickListener() {
@@ -856,6 +907,143 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         }
     }
 
+    // ---------------- 书签 ----------------
+
+    private void loadMarks() {
+        marks.clear();
+        if (bookId != null) marks.addAll(Bookmarks.decode(store.bookmarks(bookId)));
+    }
+
+    private void saveMarks() {
+        if (bookId == null) return;
+        // merge 顺带排序、限量，导入来的乱序书签写回去也是有序的
+        store.setBookmarks(bookId, Bookmarks.encode(Bookmarks.merge(marks, null)));
+    }
+
+    /** 工具条上的书签按钮：同一位置再点一次就是取消。 */
+    private void toggleBookmark() {
+        if (bookId == null || currentText.length() == 0) return;
+        Object u = chapterIndex < chapters.size() ? chapters.get(chapterIndex).get("uid") : null;
+        String uid = u == null ? "" : String.valueOf(u);
+        int off = pageView.currentOffset();
+        Bookmarks.Item it = new Bookmarks.Item(uid, chapterTitle, chapterIndex, off,
+                Bookmarks.excerptOf(currentText, off), System.currentTimeMillis());
+        loadMarks();
+        boolean added = Bookmarks.toggle(marks, it);
+        saveMarks();
+        Toast.makeText(this, added ? "已添加书签 · 在 目录 › 书签 里查看" : "已取消书签",
+                Toast.LENGTH_SHORT).show();
+        if (bookmarkMode) refreshBookmarkList();
+    }
+
+    private void refreshBookmarkList() {
+        if (bookmarkAdapter != null) bookmarkAdapter.notifyDataSetChanged();
+        boolean empty = marks.isEmpty();
+        if (markEmpty != null) {
+            markEmpty.setVisibility(bookmarkMode && empty ? View.VISIBLE : View.GONE);
+        }
+        if (bookmarkTab != null) bookmarkTab.setText(empty ? "书签" : "书签 " + marks.size());
+    }
+
+    private void setBookmarkMode(boolean bm) {
+        bookmarkMode = bm;
+        if (tocTab != null) tocTab.setTextColor(bm ? Ui.LIGHT : Ui.INK);
+        if (bookmarkTab != null) bookmarkTab.setTextColor(bm ? Ui.INK : Ui.LIGHT);
+        if (tocSearch != null) tocSearch.setVisibility(bm ? View.GONE : View.VISIBLE);
+        if (tocList != null) tocList.setVisibility(bm ? View.GONE : View.VISIBLE);
+        if (markList != null) markList.setVisibility(bm ? View.VISIBLE : View.GONE);
+        if (bm) {
+            loadMarks();
+            refreshBookmarkList();
+        } else {
+            if (markEmpty != null) markEmpty.setVisibility(View.GONE);
+            bindToc();
+        }
+    }
+
+    /** 跳到书签：uid 优先（目录增删也能对上），找不到再退回存的下标。 */
+    private void gotoBookmark(Bookmarks.Item it) {
+        int index = Resume.indexOf(chapters, it.uid);
+        if (index < 0) index = it.idx;
+        index = Resume.clamp(index, chapters.size());
+        hideToolbar();
+        loadChapter(index, false, Math.max(0, it.off));
+    }
+
+    private class BookmarkAdapter extends BaseAdapter {
+        @Override
+        public int getCount() {
+            return marks.size();
+        }
+
+        @Override
+        public Object getItem(int position) {
+            return marks.get(position);
+        }
+
+        @Override
+        public long getItemId(int position) {
+            return position;
+        }
+
+        @Override
+        public View getView(final int position, View convertView, ViewGroup parent) {
+            LinearLayout row;
+            TextView[] refs;
+            if (convertView == null) {
+                row = new LinearLayout(ReaderActivity.this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                row.setGravity(Gravity.CENTER_VERTICAL);
+                row.setPadding(dp(18), dp(12), dp(10), dp(12));
+                row.setBackgroundColor(Color.WHITE);
+
+                LinearLayout texts = new LinearLayout(ReaderActivity.this);
+                texts.setOrientation(LinearLayout.VERTICAL);
+                TextView title = Ui.text(ReaderActivity.this, "", 13.5f, Ui.INK);
+                title.setMaxLines(2);
+                title.setEllipsize(TextUtils.TruncateAt.END);
+                TextView meta = Ui.text(ReaderActivity.this, "", 10.5f, Ui.LIGHT);
+                meta.setPadding(0, dp(4), 0, 0);
+                texts.addView(title);
+                texts.addView(meta);
+                row.addView(texts, new LinearLayout.LayoutParams(0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+                TextView del = Ui.text(ReaderActivity.this, "×", 20, Ui.LIGHT);
+                del.setPadding(dp(12), dp(6), dp(2), dp(6));
+                row.addView(del);
+                refs = new TextView[]{title, meta, del};
+                row.setTag(refs);
+            } else {
+                row = (LinearLayout) convertView;
+                refs = (TextView[]) row.getTag();
+            }
+            Bookmarks.Item it = marks.get(position);
+            refs[0].setText(it.excerpt.length() > 0 ? it.excerpt : it.chapter);
+            String chapter = it.chapter.length() > 0 ? it.chapter : "第 " + (it.idx + 1) + " 章";
+            String when = Bookmarks.timeLabel(it.at);
+            refs[1].setText(when.length() == 0 ? chapter : chapter + " · " + when);
+            // 复用行时 position 会变，删除按钮的监听每次都要重绑
+            refs[2].setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    if (position < marks.size()) {
+                        marks.remove(position);
+                        saveMarks();
+                        refreshBookmarkList();
+                    }
+                }
+            });
+            row.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    if (position < marks.size()) gotoBookmark(marks.get(position));
+                }
+            });
+            return row;
+        }
+    }
+
     // ---------------- 面板显隐 ----------------
 
     private void toggleToolbar() {
@@ -915,7 +1103,12 @@ public class ReaderActivity extends Activity implements PageView.Callback {
             tocPanel.bringToFront();
             showDisplay(false);
             showProgress(false);
-            bindToc();
+            if (bookmarkMode) {
+                loadMarks();
+                refreshBookmarkList();
+            } else {
+                bindToc();
+            }
         } else {
             hideKeyboard();
         }

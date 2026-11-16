@@ -38,6 +38,7 @@ import java.util.Map;
 public class LocalPickerActivity extends Activity {
 
     private static final String TAG = "WRPick";
+    private static final int REQ_SAF = 0x72;
 
     /** 常见存储挂载点，按墨水屏 ROM 的实际情况排。 */
     private static final String[] CANDIDATES = {
@@ -61,6 +62,8 @@ public class LocalPickerActivity extends Activity {
     private TextView emptyLabel;
     private TextView upBtn;
     private TextView allBtn;
+    private TextView systemPick;
+    private boolean lastGranted;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -68,17 +71,58 @@ public class LocalPickerActivity extends Activity {
         getWindow().setBackgroundDrawable(new ColorDrawable(Color.WHITE));
         setContentView(buildUi(), new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        lastGranted = Perms.granted(this);
+        rescan();
+        // Android 6+ 必须运行时申请：清单里声明了权限但没申请时 listFiles() 一律返回 null
+        if (!lastGranted) Perms.request(this);
+    }
+
+    /** 授权状态变化（系统弹窗点允许、或从设置页返回）后重新扫一遍存储。 */
+    @Override
+    protected void onResume() {
+        super.onResume();
+        boolean now = Perms.granted(this);
+        if (now != lastGranted) {
+            lastGranted = now;
+            rescan();
+        }
+    }
+
+    private void rescan() {
+        roots.clear();
+        probes.clear();
         discoverRoots();
-        if (roots.isEmpty()) {
-            rootMode = true;
-            refresh();
-        } else if (roots.size() == 1) {
+        if (roots.size() == 1) {
+            rootMode = false;
             current = roots.get(0);
-            refresh();
         } else {
-            // 多个存储（内置 + TF 卡）时先让用户选一个
+            // 没探到 / 多个存储时先让用户选一个
             rootMode = true;
-            refresh();
+            current = null;
+        }
+        refresh();
+    }
+
+    /** 系统文件管理器兜底：ROM 里若有 DocumentsUI，这条路完全不需要存储权限。 */
+    private void openSystemPicker() {
+        try {
+            Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("*/*");
+            startActivityForResult(Intent.createChooser(i, "选择 TXT / EPUB"), REQ_SAF);
+        } catch (Exception e) {
+            toast("系统没有文件管理器");
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_SAF && resultCode == RESULT_OK && data != null
+                && data.getData() != null) {
+            // content:// Uri 原样回传，书架页走 ContentResolver 导入
+            setResult(RESULT_OK, data);
+            finish();
         }
     }
 
@@ -232,7 +276,31 @@ public class LocalPickerActivity extends Activity {
         emptyLabel = Ui.text(this, "", 12, Ui.LIGHT);
         emptyLabel.setGravity(Gravity.CENTER);
         emptyLabel.setPadding(dp(24), dp(40), dp(24), dp(40));
+        emptyLabel.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (!Perms.granted(LocalPickerActivity.this)) {
+                    Perms.openSettings(LocalPickerActivity.this);
+                }
+            }
+        });
         rootView.addView(emptyLabel);
+
+        systemPick = Ui.text(this, "用系统文件管理器选文件", 13f, Ui.INK);
+        systemPick.setGravity(Gravity.CENTER);
+        systemPick.setPadding(dp(18), dp(12), dp(18), dp(12));
+        systemPick.setBackgroundDrawable(Ui.box(Color.WHITE, Ui.LINE, 1, 2));
+        systemPick.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                openSystemPicker();
+            }
+        });
+        LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        sp.gravity = Gravity.CENTER_HORIZONTAL;
+        sp.bottomMargin = dp(20);
+        rootView.addView(systemPick, sp);
         return rootView;
     }
 
@@ -332,15 +400,20 @@ public class LocalPickerActivity extends Activity {
                 : (current == null ? "" : current.getAbsolutePath()));
         allBtn.setVisibility(rootMode ? View.GONE : View.VISIBLE);
         upBtn.setVisibility(rootMode ? View.GONE : View.VISIBLE);
+        if (systemPick != null) systemPick.setVisibility(rootMode ? View.VISIBLE : View.GONE);
 
         if (rootMode) {
             items.addAll(roots);
             countLabel.setText(roots.isEmpty() ? "" : roots.size() + " 处");
             adapter.notifyDataSetChanged();
-            StringBuilder sb = new StringBuilder("没检测到可读的存储目录。\n\n"
-                    + "1) 插好 TF 卡或确认系统存储已挂载；\n"
+            StringBuilder sb = new StringBuilder("没检测到可读的存储目录。\n\n");
+            if (!Perms.granted(this)) {
+                sb.append("多半是还没给存储权限（点这段文字去开启）。\n\n");
+            }
+            sb.append("1) 插好 TF 卡或确认系统存储已挂载；\n"
                     + "2) 用数据线把 TXT / EPUB 拷到卡里；\n"
-                    + "3) 也可以用系统文件管理器「打开方式」直接打开这本书。\n\n探测结果：");
+                    + "3) 也可以点下面的「用系统文件管理器选文件」，"
+                    + "或用系统文件管理器把书「打开方式」发给本应用。\n\n探测结果：");
             int shown = 0;
             for (String p : probes) {
                 if (shown++ >= 6) break;
@@ -380,8 +453,10 @@ public class LocalPickerActivity extends Activity {
                 : LocalBooks.scanSupported(current, 3).size();
         if (unreadable) {
             countLabel.setText("读不到");
-            emptyLabel.setText("这个目录读不出内容（可能需要存储权限，或者存储没挂载）。\n\n"
-                    + current.getAbsolutePath());
+            emptyLabel.setText("这个目录读不出内容。\n\n"
+                    + (Perms.granted(this)
+                            ? "可能是存储没挂载" : "可能还没给存储权限，点这段文字去开启")
+                    + "\n\n" + current.getAbsolutePath());
             emptyLabel.setVisibility(View.VISIBLE);
         } else {
             countLabel.setText(items.size() + " 项 · " + deep + " 本书");

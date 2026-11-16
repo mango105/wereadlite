@@ -157,6 +157,16 @@ final class Bookmarks {
         return -1;
     }
 
+    /** 从列表里删掉与 it 同位置的书签，返回是否删掉。 */
+    static boolean remove(List<Item> items, Item it) {
+        int hit = indexOf(items, it);
+        if (hit >= 0) {
+            items.remove(hit);
+            return true;
+        }
+        return false;
+    }
+
     /** 当前位置已在书签里就删掉返回 false，否则加一条返回 true。 */
     static boolean toggle(List<Item> items, Item it) {
         int hit = indexOf(items, it);

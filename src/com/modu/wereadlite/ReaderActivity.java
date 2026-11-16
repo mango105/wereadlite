@@ -28,6 +28,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -80,7 +81,9 @@ public class ReaderActivity extends Activity implements PageView.Callback {
     private final List<Map<String, Object>> chapters = new ArrayList<Map<String, Object>>();
     /** 连续自动跳过（封面/版权等无正文页）的次数，防止死循环。 */
     private int autoSkips;
-    private final List<Integer> visible = new ArrayList<Integer>();
+    /** 目录抽屉的行模型：章节 / 当前读到 / 内联书签。 */
+    private final List<TocRow> tocRows = new ArrayList<TocRow>();
+    private int[] chapterStart;
     private int chapterIndex;
     private String chapterTitle = "";
     private String currentText = "";
@@ -818,32 +821,118 @@ public class ReaderActivity extends Activity implements PageView.Callback {
 
     // ---------------- 目录数据 ----------------
 
+    /** 目录行：章节 / 当前读到 / 内联书签。 */
+    private static final class TocRow {
+        static final int CHAPTER = 0;
+        static final int CURRENT = 1;
+        static final int MARK = 2;
+        final int type;
+        final int chapterIndex;
+        final Bookmarks.Item mark;
+        int pos;   // 全局累计位置，显示在右侧
+
+        TocRow(int type, int chapterIndex, Bookmarks.Item mark) {
+            this.type = type;
+            this.chapterIndex = chapterIndex;
+            this.mark = mark;
+        }
+    }
+
+    /** 算每章起始的累计字数，用来把章内偏移换算成全书位置数字。 */
+    private void computeChapterStart() {
+        chapterStart = new int[chapters.size() + 1];
+        for (int i = 0; i < chapters.size(); i++) {
+            int wc = chapters.get(i).get("wordCount") instanceof Number
+                    ? ((Number) chapters.get(i).get("wordCount")).intValue() : 0;
+            chapterStart[i + 1] = chapterStart[i] + Math.max(0, wc);
+        }
+    }
+
+    /** 重建目录行：每个章节下面挂它的书签，当前章额外插一行「当前读到」。 */
+    private void buildTocRows(String query) {
+        loadMarks();
+        computeChapterStart();
+        tocRows.clear();
+        boolean searching = query != null && query.length() > 0;
+        for (int i = 0; i < chapters.size(); i++) {
+            Map<String, Object> chapter = chapters.get(i);
+            String title = String.valueOf(chapter.get("title"));
+
+            // 本章的书签（uid 优先定位，退回存的下标）
+            java.util.List<Bookmarks.Item> here = new ArrayList<Bookmarks.Item>();
+            for (Bookmarks.Item m : marks) {
+                int mi = Resume.indexOf(chapters, m.uid);
+                if (mi < 0) mi = m.idx;
+                if (Resume.clamp(mi, chapters.size()) == i) here.add(m);
+            }
+            Collections.sort(here, new java.util.Comparator<Bookmarks.Item>() {
+                @Override
+                public int compare(Bookmarks.Item a, Bookmarks.Item b) {
+                    return a.off - b.off;
+                }
+            });
+
+            boolean titleMatch = !searching || title.contains(query);
+            boolean anyMarkMatch = false;
+            if (searching) {
+                for (Bookmarks.Item m : here) {
+                    if (m.chapter.contains(query) || m.excerpt.contains(query)) { anyMarkMatch = true; break; }
+                }
+            }
+            if (!titleMatch && !anyMarkMatch) continue;
+
+            TocRow chapterRow = new TocRow(TocRow.CHAPTER, i, null);
+            chapterRow.pos = chapterStart[i];
+            tocRows.add(chapterRow);
+
+            if (i == chapterIndex) {
+                TocRow cur = new TocRow(TocRow.CURRENT, i, null);
+                cur.pos = chapterStart[i] + Math.max(0, pageView.currentOffset());
+                tocRows.add(cur);
+            }
+            for (Bookmarks.Item m : here) {
+                if (searching && !titleMatch
+                        && !m.chapter.contains(query) && !m.excerpt.contains(query)) continue;
+                TocRow mr = new TocRow(TocRow.MARK, i, m);
+                mr.pos = chapterStart[i] + m.off;
+                tocRows.add(mr);
+            }
+        }
+    }
+
     private void bindToc() {
-        visible.clear();
-        for (int i = 0; i < chapters.size(); i++) visible.add(Integer.valueOf(i));
+        buildTocRows("");
         if (tocAdapter != null) tocAdapter.notifyDataSetChanged();
-        if (tocList != null) tocList.setSelection(Math.max(0, Math.min(chapterIndex, visible.size() - 1)));
+        if (tocList != null) tocList.setSelection(currentRowSelection());
     }
 
     private void filterToc(String query) {
-        visible.clear();
-        for (int i = 0; i < chapters.size(); i++) {
-            String title = String.valueOf(chapters.get(i).get("title"));
-            if (query.length() == 0 || title.contains(query)) visible.add(Integer.valueOf(i));
-        }
+        buildTocRows(query);
         tocAdapter.notifyDataSetChanged();
-        if (query.length() > 0 && !visible.isEmpty()) tocList.setSelection(0);
+        if (query.length() > 0 && !tocRows.isEmpty()) tocList.setSelection(0);
+    }
+
+    /** 打开抽屉时滚到「当前读到」那一行。 */
+    private int currentRowSelection() {
+        for (int i = 0; i < tocRows.size(); i++) {
+            if (tocRows.get(i).type == TocRow.CURRENT) return i;
+        }
+        for (int i = 0; i < tocRows.size(); i++) {
+            if (tocRows.get(i).type == TocRow.CHAPTER
+                    && tocRows.get(i).chapterIndex == chapterIndex) return i;
+        }
+        return 0;
     }
 
     private class TocAdapter extends BaseAdapter {
         @Override
         public int getCount() {
-            return visible.size();
+            return tocRows.size();
         }
 
         @Override
         public Object getItem(int position) {
-            return visible.get(position);
+            return tocRows.get(position);
         }
 
         @Override
@@ -853,35 +942,38 @@ public class ReaderActivity extends Activity implements PageView.Callback {
 
         @Override
         public View getView(int position, View convertView, ViewGroup parent) {
-            LinearLayout row;
-            TextView title;
-            TextView words;
-            if (convertView == null) {
-                row = new LinearLayout(ReaderActivity.this);
-                row.setOrientation(LinearLayout.HORIZONTAL);
-                row.setGravity(Gravity.CENTER_VERTICAL);
-                row.setPadding(dp(18), dp(14), dp(16), dp(14));
-                row.setBackgroundColor(Color.WHITE);
+            TocRow row = tocRows.get(position);
+            if (row.type == TocRow.CURRENT) return currentRow(row, convertView);
+            if (row.type == TocRow.MARK) return markRow(row, convertView);
+            return chapterRow(row, convertView);
+        }
 
+        private View chapterRow(final TocRow row, View convertView) {
+            LinearLayout v = (LinearLayout) convertView;
+            TextView title, words;
+            if (v == null || !Integer.valueOf(TocRow.CHAPTER).equals(v.getTag())) {
+                v = new LinearLayout(ReaderActivity.this);
+                v.setOrientation(LinearLayout.HORIZONTAL);
+                v.setGravity(Gravity.CENTER_VERTICAL);
+                v.setPadding(dp(18), dp(13), dp(16), dp(13));
+                v.setBackgroundColor(Color.WHITE);
                 title = Ui.text(ReaderActivity.this, "", 14, Ui.SUB);
                 title.setMaxLines(2);
                 title.setEllipsize(TextUtils.TruncateAt.END);
-                row.addView(title, new LinearLayout.LayoutParams(0,
+                v.addView(title, new LinearLayout.LayoutParams(0,
                         ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
                 words = Ui.text(ReaderActivity.this, "", 10.5f, 0xFFB0B0B0);
                 words.setPadding(dp(8), 0, 0, 0);
-                row.addView(words);
-                row.setTag(new TextView[]{title, words});
+                v.addView(words);
+                v.setTag(Integer.valueOf(TocRow.CHAPTER));
+                v.setTag(0x7F000001, new TextView[]{title, words});
             } else {
-                row = (LinearLayout) convertView;
-                TextView[] refs = (TextView[]) row.getTag();
+                TextView[] refs = (TextView[]) v.getTag(0x7F000001);
                 title = refs[0];
                 words = refs[1];
             }
-            final int index = visible.get(position);
-            Map<String, Object> chapter = chapters.get(index);
-            title.setText(String.valueOf(chapter.get("title")));
+            final int index = row.chapterIndex;
+            title.setText(String.valueOf(chapters.get(index).get("title")));
             if (index == chapterIndex) {
                 title.setTextColor(Ui.INK);
                 title.setTypeface(Typeface.DEFAULT_BOLD);
@@ -889,21 +981,129 @@ public class ReaderActivity extends Activity implements PageView.Callback {
                 title.setTextColor(Ui.SUB);
                 title.setTypeface(Typeface.DEFAULT);
             }
-            int level = chapter.get("level") instanceof Number
-                    ? ((Number) chapter.get("level")).intValue() : 0;
+            int level = chapters.get(index).get("level") instanceof Number
+                    ? ((Number) chapters.get(index).get("level")).intValue() : 0;
             title.setPadding(dp(level > 1 ? 14 : 0), 0, 0, 0);
-            int count = chapter.get("wordCount") instanceof Number
-                    ? ((Number) chapter.get("wordCount")).intValue() : 0;
-            words.setText(count > 0 ? String.valueOf(count) : "");
-
-            row.setOnClickListener(new View.OnClickListener() {
+            words.setText(row.pos > 0 ? String.valueOf(row.pos) : "");
+            v.setOnClickListener(new View.OnClickListener() {
                 @Override
-                public void onClick(View v) {
+                public void onClick(View view) {
                     hideToolbar();
                     if (index != chapterIndex) loadChapter(index, false, 0);
                 }
             });
-            return row;
+            return v;
+        }
+
+        /** 「当前读到 + 添加书签」：点亮当前章，书签入口就在目录里。 */
+        private View currentRow(final TocRow row, View convertView) {
+            LinearLayout v = (LinearLayout) convertView;
+            TextView label, pos;
+            if (v == null || !Integer.valueOf(TocRow.CURRENT).equals(v.getTag())) {
+                v = new LinearLayout(ReaderActivity.this);
+                v.setOrientation(LinearLayout.HORIZONTAL);
+                v.setGravity(Gravity.CENTER_VERTICAL);
+                v.setPadding(dp(18), dp(11), dp(16), dp(11));
+                v.setBackgroundColor(0xFFF6F2E8);
+
+                NavIcon icon = new NavIcon(ReaderActivity.this, NavIcon.OPENBOOK);
+                icon.setInk(0xFFA8782C);
+                v.addView(icon, new LinearLayout.LayoutParams(dp(17), dp(17)));
+
+                label = Ui.text(ReaderActivity.this, "", 12.5f, 0xFFA8782C);
+                label.setPadding(dp(9), 0, dp(8), 0);
+                v.addView(label, new LinearLayout.LayoutParams(0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+                pos = Ui.text(ReaderActivity.this, "", 10.5f, 0xFFB0A48C);
+                v.addView(pos);
+                v.setTag(Integer.valueOf(TocRow.CURRENT));
+                v.setTag(0x7F000001, new TextView[]{label, pos});
+            } else {
+                TextView[] refs = (TextView[]) v.getTag(0x7F000001);
+                label = refs[0];
+                pos = refs[1];
+            }
+            boolean hasHere = currentHasBookmark();
+            label.setText(hasHere ? "当前读到 · 取消书签" : "当前读到 · 添加书签");
+            pos.setText(row.pos > 0 ? String.valueOf(row.pos) : "");
+            v.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View view) {
+                    toggleBookmark();
+                    buildTocRows("");
+                    tocAdapter.notifyDataSetChanged();
+                }
+            });
+            return v;
+        }
+
+        /** 内联书签行：图标 + 摘录 + 章名/时间 + 位置，右侧可删。 */
+        private View markRow(final TocRow row, View convertView) {
+            LinearLayout v = (LinearLayout) convertView;
+            TextView excerpt, meta, pos, del;
+            if (v == null || !Integer.valueOf(TocRow.MARK).equals(v.getTag())) {
+                v = new LinearLayout(ReaderActivity.this);
+                v.setOrientation(LinearLayout.HORIZONTAL);
+                v.setGravity(Gravity.CENTER_VERTICAL);
+                v.setPadding(dp(18), dp(11), dp(12), dp(11));
+                v.setBackgroundColor(Color.WHITE);
+
+                NavIcon icon = new NavIcon(ReaderActivity.this, NavIcon.BOOKMARK);
+                icon.setInk(0xFF8A8A8A);
+                v.addView(icon, new LinearLayout.LayoutParams(dp(16), dp(16)));
+
+                LinearLayout texts = new LinearLayout(ReaderActivity.this);
+                texts.setOrientation(LinearLayout.VERTICAL);
+                excerpt = Ui.text(ReaderActivity.this, "", 12.5f, Ui.INK);
+                excerpt.setMaxLines(1);
+                excerpt.setEllipsize(TextUtils.TruncateAt.END);
+                meta = Ui.text(ReaderActivity.this, "", 10f, Ui.LIGHT);
+                meta.setPadding(0, dp(3), 0, 0);
+                meta.setMaxLines(1);
+                meta.setEllipsize(TextUtils.TruncateAt.END);
+                texts.addView(excerpt);
+                texts.addView(meta);
+                v.addView(texts, new LinearLayout.LayoutParams(0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+                pos = Ui.text(ReaderActivity.this, "", 10.5f, 0xFFB0A48C);
+                pos.setPadding(dp(6), 0, dp(4), 0);
+                v.addView(pos);
+                del = Ui.text(ReaderActivity.this, "×", 19, 0xFFBBBBBB);
+                del.setPadding(dp(8), dp(2), dp(2), dp(2));
+                v.addView(del);
+                v.setTag(Integer.valueOf(TocRow.MARK));
+                v.setTag(0x7F000001, new TextView[]{excerpt, meta, pos, del});
+            } else {
+                TextView[] refs = (TextView[]) v.getTag(0x7F000001);
+                excerpt = refs[0];
+                meta = refs[1];
+                pos = refs[2];
+                del = refs[3];
+            }
+            final Bookmarks.Item m = row.mark;
+            excerpt.setText(m.excerpt.length() > 0 ? m.excerpt : m.chapter);
+            String when = Bookmarks.timeLabel(m.at);
+            meta.setText(when.length() == 0 ? m.chapter : m.chapter + " · " + when);
+            pos.setText(row.pos > 0 ? String.valueOf(row.pos) : "");
+            del.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View view) {
+                    Bookmarks.remove(marks, m);
+                    saveMarks();
+                    buildTocRows("");
+                    tocAdapter.notifyDataSetChanged();
+                    refreshBookmarkList();
+                }
+            });
+            v.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View view) {
+                    gotoBookmark(m);
+                }
+            });
+            return v;
         }
     }
 
@@ -920,6 +1120,14 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         store.setBookmarks(bookId, Bookmarks.encode(Bookmarks.merge(marks, null)));
     }
 
+    /** 当前页这个位置是否已有书签，决定「当前读到」行显示添加还是取消。 */
+    private boolean currentHasBookmark() {
+        if (bookId == null || chapterIndex >= chapters.size()) return false;
+        Object u = chapters.get(chapterIndex).get("uid");
+        String uid = u == null ? "" : String.valueOf(u);
+        return Bookmarks.indexOf(marks, uid, chapterIndex, pageView.currentOffset()) >= 0;
+    }
+
     /** 工具条上的书签按钮：同一位置再点一次就是取消。 */
     private void toggleBookmark() {
         if (bookId == null || currentText.length() == 0) return;
@@ -931,9 +1139,14 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         loadMarks();
         boolean added = Bookmarks.toggle(marks, it);
         saveMarks();
-        Toast.makeText(this, added ? "已添加书签 · 在 目录 › 书签 里查看" : "已取消书签",
+        Toast.makeText(this, added ? "已添加书签 · 目录里可直接看到" : "已取消书签",
                 Toast.LENGTH_SHORT).show();
+        // 工具条添加时目录抽屉没开也要保证 marks 最新；开着就重建内联行
         if (bookmarkMode) refreshBookmarkList();
+        if (tocPanel != null && tocPanel.getVisibility() == View.VISIBLE) {
+            buildTocRows("");
+            if (tocAdapter != null) tocAdapter.notifyDataSetChanged();
+        }
     }
 
     private void refreshBookmarkList() {

@@ -33,6 +33,7 @@ final class NavIcon extends View {
     static final int LETTER_A = 20;
     static final int INFO = 21;
     static final int BOOKMARK = 22;
+    static final int OPENBOOK = 23;
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path path = new Path();
@@ -264,6 +265,25 @@ final class NavIcon extends View {
                 path.lineTo(17.8f, 20.2f);
                 path.lineTo(12f, 15.4f);
                 path.lineTo(6.2f, 20.2f);
+                path.close();
+                canvas.drawPath(path, paint);
+                break;
+            case OPENBOOK:
+                // 展开的书：中缝低、两侧页角翘起
+                path.moveTo(12f, 8.2f);
+                path.lineTo(12f, 19.4f);
+                canvas.drawPath(path, paint);
+                path.reset();
+                path.moveTo(12f, 8.2f);
+                path.lineTo(8.2f, 5.8f);
+                path.lineTo(3.6f, 6.4f);
+                path.lineTo(3.6f, 17.6f);
+                path.lineTo(8.2f, 17f);
+                path.lineTo(12f, 19.4f);
+                path.lineTo(15.8f, 17f);
+                path.lineTo(20.4f, 17.6f);
+                path.lineTo(20.4f, 6.4f);
+                path.lineTo(15.8f, 5.8f);
                 path.close();
                 canvas.drawPath(path, paint);
                 break;

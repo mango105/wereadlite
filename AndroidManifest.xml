@@ -11,7 +11,8 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
-        android:label="微信读书"
+        android:label="微读lite"
+        android:icon="@mipmap/ic_launcher"
         android:allowBackup="false"
         android:hardwareAccelerated="true"
         android:theme="@android:style/Theme.Light.NoTitleBar">

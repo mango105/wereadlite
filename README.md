@@ -1,4 +1,4 @@
-# 微信读书 · 电纸书精简客户端（wereadlite）
+# 微读lite（wereadlite）· 电纸书精简客户端
 
 给**低性能安卓电纸书**写的微信读书客户端。安装包约 130 KB，默认最低支持 Android 4.2（可另出 Android 4.0 包），不依赖 AndroidX、不依赖 WebView、不用 Gradle，界面 100% 代码直绘，专注把「读」这一件事做顺。
 
@@ -30,11 +30,11 @@ bash tools/selftest.sh         # JVM 解析回归（当前 198 条断言）
 
 | 取舍 | 做法 |
 | --- | --- |
-| 界面 | 100% 代码直绘，`res/` 目录是空的：没有 XML 布局、没有 png 图标、没有主题包。图标（返回箭头、勾选、目录、书签、想法气泡等）由 Canvas 现画 |
+| 界面 | 100% 代码直绘：没有 XML 布局、没有主题包。`res/` 里只放 5 个密度的 launcher 图标 PNG，界面内图标（返回箭头、勾选、目录、书签、想法气泡等）全部由 Canvas 现画 |
 | 依赖 | 只有一个 `libs-zxing.jar`（二维码），其余全部走 Android framework |
 | 渲染 | 黑白直绘、无过渡动画。墨水屏本来也不靠中间帧表达状态，去掉动画既省内存又更跟手 |
 | 分页 | 自己用 `StaticLayout` 手动分页，不引入任何阅读引擎 |
-| 构建 | `javac --release 8` → R8 压缩脱糖 → `aapt2 link` → zipalign → apksigner。产物 `classes.dex` 约 290 KB，签名后 APK 约 135 KB |
+| 构建 | `javac --release 8` → R8 压缩脱糖 → `aapt2 compile` + `link` → zipalign → apksigner。产物 `classes.dex` 约 290 KB |
 
 ## 低版本适配
 
@@ -96,6 +96,9 @@ bash tools/selftest.sh         # JVM 解析回归（当前 198 条断言）
 - 「我」页新增导出 / 导入书签，导出为 JSON 文件、导入按位置合并去重且不覆盖本地，实现跨设备同步，不依赖未公开的云端书签接口。
 - 修复「导入本地书选不到文件」：Android 6+ 补运行时存储权限申请（反射调用以兼容 minSdk 17 编译与 dex API 级别校验）、保持 targetSdk 28 默认的 legacy 外部存储行为、权限被拒给可点的授权引导；自带选择器新增「用系统文件管理器选文件」兜底。
 - 登录页新增「跳过登录，先读本地书」，兑现「不登录也能用本地导入」；离线模式只显示本地书。
+- 应用名统一为「微读lite」：Manifest 标签、登录页标题、版本号文案、launcher 图标全部对齐；未登录时「我」页显示「本地读者」。
+- 新增 launcher 图标（黑白线稿展开的书）；原稿边缘的浅色底、白描边与外框线已清理，四角圆角重新生成，配 5 个密度。
+- 「我」页补云端书架引导：说明「官方 App 传书 → 这里同步书架」的路径，并明确本机导入的 TXT / EPUB 只存于本设备（本地书跨设备请用书签导出/导入，或官方 App 传书）。
 - 清理目录抽屉里重复的一次封面加载调用；解析回归补 21 条书签断言。
 
 ### 0.2.7
@@ -108,7 +111,9 @@ bash tools/selftest.sh         # JVM 解析回归（当前 198 条断言）
 
 ```
 src/com/modu/wereadlite/   33 个 java，9 个 Activity，全部界面与逻辑；Bookmarks 纯数据层、Perms 权限兼容层
-tools/                     SelfTest 解析回归、api_level.py API 级别校验、ui.py adb 冒烟
+tools/                     SelfTest 解析回归、api_level.py API 级别校验、ui.py adb 冒烟、IconClean 图标清理
+res/mipmap-*/               5 个密度的 ic_launcher.png（由 design/icon-source.png 生成，勿手改）
+design/                    图标原稿与清理后的预览稿
 微读界面稿预览/             6 张界面参考稿
 build.sh                   无 Gradle 的完整打包链
 AndroidManifest.xml        minSdk / targetSdk / 权限 / 9 个 Activity 的 configChanges

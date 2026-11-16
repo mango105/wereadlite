@@ -55,7 +55,7 @@ public class LoginActivity extends Activity {
         root.setPadding(pad, pad, pad, pad);
 
         TextView title = new TextView(this);
-        title.setText("微信读书");
+        title.setText("微读lite");
         title.setTextColor(Color.BLACK);
         title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
         title.setGravity(Gravity.CENTER);

@@ -13,7 +13,7 @@ final class Ui {
     static final int LIGHT = 0xFF9A9A9A;
     static final int LINE = 0xFFDCDCDC;
     static final int TILE = 0xFFF5F5F5;
-    static final String APP_NAME = "微信读书轻客户端";
+    static final String APP_NAME = "微读lite";
 
     private Ui() {
     }

@@ -645,7 +645,7 @@ public class MainActivity extends Activity {
         alp.gravity = Gravity.CENTER_HORIZONTAL;
         box.addView(avatar, alp);
 
-        TextView name = Ui.text(this, "微信读书用户", 16.5f, Ui.INK);
+        TextView name = Ui.text(this, api.loggedIn() ? "微信读书用户" : "本地读者", 16.5f, Ui.INK);
         name.setGravity(Gravity.CENTER);
         name.setPadding(0, dp(12), 0, 0);
         box.addView(name, new LinearLayout.LayoutParams(
@@ -702,6 +702,15 @@ public class MainActivity extends Activity {
                 toast("正在同步书架…");
             }
         }));
+        TextView tip = Ui.text(this,
+                "想在别的设备读自己的书？用微信读书 App「传书」到云端，"
+                        + "回来点上面「同步书架」即可。"
+                        + "本机导入的 TXT / EPUB 只存于本设备。",
+                11f, Ui.LIGHT);
+        tip.setLineSpacing(dp(4), 1f);
+        tip.setPadding(0, dp(8), 0, dp(6));
+        meRows.addView(tip, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         meRows.addView(meRow("导出书签", store.bookmarkCount() + " 条",
                 new View.OnClickListener() {
                     @Override

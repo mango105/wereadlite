@@ -135,7 +135,7 @@ echo "platform : $PLATFORM"
 echo "java     : $JAVA  (JDK $(java_major "$JAVA"))"
 echo "min/target: $MIN_SDK / $TARGET_SDK"
 
-rm -rf "$OUT" && mkdir -p "$OUT/classes" "$OUT/dex" "$DIST"
+rm -rf "$OUT" && mkdir -p "$OUT/classes" "$OUT/dex" "$OUT/flat" "$DIST"
 sed "s/android:minSdkVersion=\"[0-9]*\"/android:minSdkVersion=\"$MIN_SDK\"/" \
     "$ROOT/AndroidManifest.xml" > "$OUT/AndroidManifest.xml"
 
@@ -155,7 +155,10 @@ echo "[2/7] R8 压缩 + 脱糖 (min-api $MIN_SDK)"
     --output "$(win "$OUT/dex")" \
     "$(win "$OUT/app.jar")" "$Z"
 
-echo "[3/7] aapt2 link"
+echo "[3/7] aapt2 资源编译 + link"
+# launcher 图标是 res/mipmap-* 下的 PNG，必须先 compile 成 .flat 才能被 Manifest 的
+# @mipmap/ic_launcher 引用；--dir 一次收走整棵资源树，输出一个 zip 直接喂给 link。
+"$AAPT2" compile --dir "$(win "$ROOT/res")" -o "$(win "$OUT/flat/res.zip")"
 "$AAPT2" link \
     -o "$(win "$OUT/base.apk")" \
     -I "$P" \
@@ -163,7 +166,8 @@ echo "[3/7] aapt2 link"
     --min-sdk-version "$MIN_SDK" \
     --target-sdk-version "$TARGET_SDK" \
     --version-code "$VERSION_CODE" \
-    --version-name "$VERSION_NAME"
+    --version-name "$VERSION_NAME" \
+    "$(win "$OUT/flat/res.zip")"
 
 echo "[4/7] 塞入 classes.dex"
 python - "$OUT/base.apk" "$OUT/dex/classes.dex" <<'PY'

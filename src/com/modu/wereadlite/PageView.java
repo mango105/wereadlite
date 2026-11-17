@@ -30,13 +30,13 @@ public class PageView extends View {
 
     /** 页脚文字来源：整本书进度或按章进度由外部决定。 */
     public interface Footer {
-        /** 上排居中：书名 / 作者。 */
+        /** 页脚居中：书名 / 作者。 */
         String caption();
 
-        /** 左下角：页码。 */
+        /** 页脚左侧：页码。 */
         String pageLabel(int localPage, int localTotal, int offset);
 
-        /** 右下角：百分比。 */
+        /** 页脚右侧：百分比。 */
         String percentLabel(int localPage, int localTotal, int offset);
     }
 
@@ -53,7 +53,7 @@ public class PageView extends View {
     /** 左右边距，dp。 */
     private int marginDp = 14;
     private int margin;
-    /** 页脚区高度：两行文字 + 分隔线，正文排版不占用这块。 */
+    /** 页脚区高度：一行文字 + 分隔线，正文排版不占用这块。 */
     private int footerHeight;
     /** 首行缩进，按半角格算：2 格 = 1 个汉字，4 格即标准的两字缩进。 */
     private int indentCells = 4;
@@ -149,7 +149,7 @@ public class PageView extends View {
 
     private void applyMetrics() {
         margin = dp(marginDp);
-        footerHeight = dp(48);
+        footerHeight = dp(30);
         applyFontSize();
     }
 
@@ -363,36 +363,38 @@ public class PageView extends View {
         canvas.restore();
 
         if (!footerShown) return;
-        // 页脚两行：上排书名/作者居中，下排页码与百分比贴左右；分隔线压在上排之上。
-        int baseY = getHeight() - dp(7);
-        int capY = baseY - dp(19);
-        int ruleY = capY - dp(13);
+        // 页脚一行：左页码 / 中书名·作者 / 右百分比，省下一行给正文。
+        int baseY = getHeight() - dp(9);
+        int ruleY = baseY - dp(18);
         canvas.drawLine(margin, ruleY, getWidth() - margin, ruleY, rulePaint);
 
-        captionPaint.setTextSize(dp(11));
+        footerPaint.setTextSize(dp(11));
+        String left = footer == null ? null : footer.pageLabel(index, starts.length, currentOffset());
+        String right = footer == null ? null : footer.percentLabel(index, starts.length, currentOffset());
+        if (left == null) left = (index + 1) + "/" + starts.length;
+        if (right == null) right = percent();
+        float leftW = footerPaint.measureText(left);
+        float rightW = right.length() == 0 ? 0f : footerPaint.measureText(right);
+        canvas.drawText(left, margin, baseY, footerPaint);
+        if (rightW > 0f) {
+            canvas.drawText(right, getWidth() - margin - rightW, baseY, footerPaint);
+        }
+
+        captionPaint.setTextSize(dp(10));
         String cap = footer == null ? "" : footer.caption();
         if (cap == null) cap = "";
         if (cap.length() > 0) {
-            CharSequence e = TextUtils.ellipsize(cap, captionPaint,
-                    getWidth() - margin * 2f, TextUtils.TruncateAt.END);
-            String s = e.toString();
-            canvas.drawText(s, (getWidth() - captionPaint.measureText(s)) / 2f,
-                    capY, captionPaint);
-        }
-
-        footerPaint.setTextSize(dp(12));
-        String left = null;
-        String right = null;
-        if (footer != null) {
-            left = footer.pageLabel(index, starts.length, currentOffset());
-            right = footer.percentLabel(index, starts.length, currentOffset());
-        }
-        if (left == null) left = (index + 1) + "/" + starts.length;
-        if (right == null) right = percent();
-        canvas.drawText(left, margin, baseY, footerPaint);
-        if (right.length() > 0) {
-            canvas.drawText(right, getWidth() - margin
-                    - footerPaint.measureText(right), baseY, footerPaint);
+            // 书名夹在左右信息之间，宽度不够就省略，避免三者重叠
+            float gap = dp(10);
+            float avail = getWidth() - margin * 2f - leftW - rightW - gap * 2f;
+            if (avail > dp(36)) {
+                CharSequence e = TextUtils.ellipsize(cap, captionPaint, avail,
+                        TextUtils.TruncateAt.END);
+                String s = e.toString();
+                float capW = captionPaint.measureText(s);
+                float capX = margin + leftW + gap + (avail - capW) / 2f;
+                canvas.drawText(s, capX, baseY, captionPaint);
+            }
         }
     }
 

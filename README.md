@@ -1,6 +1,6 @@
 # 微读lite（wereadlite）· 电纸书精简客户端
 
-给**低性能安卓电纸书**写的微信读书客户端。安装包约 130 KB，默认最低支持 Android 4.2（可另出 Android 4.0 包），不依赖 AndroidX、不依赖 WebView、不用 Gradle，界面 100% 代码直绘，专注把「读」这一件事做顺。
+给**低性能安卓电纸书**写的微信读书客户端。安装包约 155 KB，默认最低支持 Android 4.2（可另出 Android 4.0 包），不依赖 AndroidX、不依赖 WebView、不用 Gradle，界面 100% 代码直绘，专注把「读」这一件事做顺。
 
 > ⚠️ 非官方客户端，与腾讯 / 微信读书官方无关，仅供个人学习与自用。微信读书接口无公开文档，随时可能因服务端调整而失效；请勿用于商业用途或大规模分发。
 
@@ -8,16 +8,16 @@
 
 ### 直接安装
 
-1. 从 [Releases](../../releases) 下载 `wereadlite-0.2.8.apk`（V1 签名，minSdk 17 / Android 4.2+）。
+1. 从 [Releases](../../releases) 下载 `wereadlite-0.2.9.apk`（V1 签名，minSdk 17 / Android 4.2+）。
 2. 传到电纸书上安装。Android 4.0 设备用带 `-min14` 后缀的包。
 3. 首次打开用微信扫码登录；**不登录也能用**：登录页点「跳过登录，先读本地书」，在书架页点「导入」即可读本地 TXT / EPUB。
 
 ### 从源码构建
 
 ```bash
-bash build.sh                  # minSdk 17，产物 dist/wereadlite-0.2.8.apk
+bash build.sh                  # minSdk 17，产物 dist/wereadlite-0.2.9.apk
 MIN_SDK=14 bash build.sh       # minSdk 14，产物带 -min14 后缀
-bash tools/selftest.sh         # JVM 解析回归（当前 198 条断言）
+bash tools/selftest.sh         # JVM 解析回归（当前 226 条断言）
 ```
 
 环境要求：Android SDK（对应 minSdk 的 platform 桩 + build-tools，可用 `ANDROID_HOME` 指定）、JDK 11 以上（跑 R8 与 apksigner，可用 `JDK17` 指定）、python3（工具脚本）。工具链全部自动探测，不需要 Gradle、不需要 Android Studio。
@@ -91,6 +91,14 @@ bash tools/selftest.sh         # JVM 解析回归（当前 198 条断言）
 
 ## 更新记录
 
+### 0.2.9
+- 新增「整包备份 / 恢复」：本地书 + 阅读进度 + 书签 + 设置打成一个 ZIP，走系统文件选择器导出到任意位置；换机或卸载重装后导入即可全部还原。「我」页新增两个入口。
+  - 导出同时落一份到应用专属目录 `Android/data/com.modu.wereadlite/files/`，没有文件管理器也能用数据线取走。
+  - 恢复按目录名去重：本地已有的书整本跳过不覆盖；进度按时间戳取新、阅读时长取大、书签按位置合并、设置恢复；登录会话与授权凭证**不进备份包**，换设备需重新扫码登录。
+  - ZIP 格式 `meta.json` + `prefs.json` + `books/`，防目录穿越；`Backup.java` 为纯 Java 数据层，回归补 28 条断言。
+- 页脚从两行改为一行：左页码 / 中书名·作者 / 右百分比同排显示，中间文字按可用宽度自动省略，页脚高度 48dp→30dp，每页正文多显示一段。
+- 为什么需要备份：本地书存在应用私有目录、进度书签存在 SharedPreferences，覆盖安装会保留，但**卸载重装 / 换设备会被系统清空**（`allowBackup=false`，无云端同步）。备份文件是这些数据的唯一可迁移副本，请妥善保存。
+
 ### 0.2.8
 - 新增书签：阅读页底栏一键加 / 取消；目录抽屉改为官方式内联布局——当前章顶部高亮「当前读到 · 添加/取消书签」行，每条书签直接挂在所属章节下方（图标 + 摘录 + 章名/时间 + 全书位置 + 删除），点书签跳转，底部「书签」页仍可按时间集中查看；书签按章节 uid + 原文偏移记录，和进度、缩进共用同一套坐标，续页与搜索过滤都不会错位。
 - 「我」页新增导出 / 导入书签，导出为 JSON 文件、导入按位置合并去重且不覆盖本地，实现跨设备同步，不依赖未公开的云端书签接口。
@@ -110,7 +118,7 @@ bash tools/selftest.sh         # JVM 解析回归（当前 198 条断言）
 ## 目录
 
 ```
-src/com/modu/wereadlite/   33 个 java，9 个 Activity，全部界面与逻辑；Bookmarks 纯数据层、Perms 权限兼容层
+src/com/modu/wereadlite/   34 个 java，9 个 Activity，全部界面与逻辑；Bookmarks/Backup 纯数据层、Perms 权限兼容层
 tools/                     SelfTest 解析回归、api_level.py API 级别校验、ui.py adb 冒烟、IconClean 图标清理
 res/mipmap-*/               5 个密度的 ic_launcher.png（由 design/icon-source.png 生成，勿手改）
 design/                    图标原稿与清理后的预览稿

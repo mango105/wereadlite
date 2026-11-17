@@ -87,6 +87,8 @@ public class MainActivity extends Activity {
     /** 未登录的离线模式：只显示本地导入的书，不去拉云端书架。 */
     private boolean offline;
     private String pendingExport;
+    /** 整包备份：后台生成好的 ZIP 字节，等 SAF 选完保存位置再写出去。 */
+    private byte[] pendingBackup;
     private int tab = TAB_SHELF;
 
     private static final int TAB_DISCOVER = 0;
@@ -722,6 +724,18 @@ public class MainActivity extends Activity {
             @Override
             public void onClick(View v) {
                 pickBookmarkImport();
+            }
+        }));
+        meRows.addView(meRow("备份到本地", "书 + 进度 + 书签", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                exportBackup();
+            }
+        }));
+        meRows.addView(meRow("从备份恢复", "换机 / 重装后用", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                pickBackupImport();
             }
         }));
         if (offline && !api.loggedIn()) {
@@ -1403,6 +1417,8 @@ public class MainActivity extends Activity {
     private static final int REQ_PICK = 0x53;
     private static final int REQ_EXPORT_BM = 0x54;
     private static final int REQ_IMPORT_BM = 0x55;
+    private static final int REQ_EXPORT_BACKUP = 0x56;
+    private static final int REQ_IMPORT_BACKUP = 0x57;
 
     /** 选一个 TXT / EPUB 导入书架。用自带的文件浏览器，墨水屏 ROM 多数没装 DocumentsUI。 */
     private void pickBook() {
@@ -1534,6 +1550,173 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    // ---------------- 整包备份 / 恢复 ----------------
+
+    private String backupFileName() {
+        return "wereadlite-backup-" + new java.text.SimpleDateFormat("yyyyMMdd-HHmm",
+                java.util.Locale.CHINA).format(new java.util.Date()) + ".zip";
+    }
+
+    /** 后台生成 ZIP 字节 + 落一份到应用专属目录，再弹 SAF 选保存位置。 */
+    private void exportBackup() {
+        toast("正在打包…");
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final String name = backupFileName();
+                java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+                boolean ok = false;
+                String err = null;
+                try {
+                    File booksDir = new File(getFilesDir(), "books");
+                    Backup.write(bos, booksDir, store.exportWantedPrefs(),
+                            Ui.version(MainActivity.this), System.currentTimeMillis());
+                    pendingBackup = bos.toByteArray();
+                    // 兜底：写一份到应用专属目录，没有文件管理器也能用数据线取走
+                    File dir = getExternalFilesDir(null);
+                    if (dir == null) dir = getFilesDir();
+                    writeBytes(new File(dir, name), pendingBackup);
+                    ok = true;
+                } catch (Exception e) {
+                    err = e.getMessage() == null ? e.toString() : e.getMessage();
+                }
+                final String errMsg = err;
+                final String fileName = name;
+                final boolean okFinal = ok;
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (!okFinal) {
+                            toast("打包失败：" + errMsg);
+                            return;
+                        }
+                        try {
+                            Intent i = new Intent("android.intent.action.CREATE_DOCUMENT");
+                            i.addCategory(Intent.CATEGORY_OPENABLE);
+                            i.setType("application/zip");
+                            i.putExtra("android.intent.extra.TITLE", fileName);
+                            startActivityForResult(i, REQ_EXPORT_BACKUP);
+                            File dir = getExternalFilesDir(null);
+                            if (dir == null) dir = getFilesDir();
+                            toast("选择保存位置；也已存 " + new File(dir, fileName).getAbsolutePath());
+                        } catch (Exception e) {
+                            // 没有 DocumentsUI：兜底文件已经落好
+                            File dir = getExternalFilesDir(null);
+                            if (dir == null) dir = getFilesDir();
+                            pendingBackup = null;
+                            toast("系统没有文件管理器，已备份到 " + new File(dir, fileName).getAbsolutePath());
+                        }
+                    }
+                });
+            }
+        }).start();
+    }
+
+    /** SAF 选完保存位置后把生成好的字节写出去。 */
+    private void writeBackupTo(android.net.Uri uri) {
+        byte[] data = pendingBackup;
+        pendingBackup = null;
+        if (data == null) {
+            toast("备份已过期，请重新备份");
+            return;
+        }
+        java.io.OutputStream out = null;
+        try {
+            out = getContentResolver().openOutputStream(uri);
+            if (out == null) throw new java.io.IOException("打不开目标文件");
+            out.write(data);
+            toast("备份完成（书 + 进度 + 书签 + 设置）");
+        } catch (Exception e) {
+            toast("导出失败：" + e.getMessage());
+        } finally {
+            if (out != null) try {
+                out.close();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private void pickBackupImport() {
+        Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        try {
+            startActivityForResult(Intent.createChooser(i, "选择备份 ZIP"), REQ_IMPORT_BACKUP);
+        } catch (Exception e) {
+            toast("系统没有文件管理器，请把备份放到应用专属目录再试");
+        }
+    }
+
+    /** 后台：校验 meta → 合并偏好 → 恢复书文件 → 回主线程提示。 */
+    private void restoreBackupFrom(final android.net.Uri uri) {
+        toast("正在恢复…");
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                String err = null;
+                int prefsN = 0;
+                int added = 0;
+                int skipped = 0;
+                java.io.InputStream in = null;
+                try {
+                    in = getContentResolver().openInputStream(uri);
+                    if (in == null) throw new java.io.IOException("打不开文件");
+                    java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+                    byte[] chunk = new byte[8192];
+                    int n;
+                    while ((n = in.read(chunk)) > 0) buf.write(chunk, 0, n);
+                    final byte[] zip = buf.toByteArray();
+
+                    java.util.Map<String, Object> meta = Backup.readMeta(
+                            new java.io.ByteArrayInputStream(zip));
+                    int format = Json.num(meta, "format");
+                    if (format != Backup.FORMAT) throw new java.io.IOException("备份版本不兼容");
+
+                    // 偏好合并（进度取新、书签 merge、设置恢复）
+                    java.util.Map<String, String> prefs = Backup.readPrefs(
+                            new java.io.ByteArrayInputStream(zip));
+                    prefsN = store.mergeImportedPrefs(prefs);
+
+                    // 书文件：先算差集，已存在的跳过不覆盖
+                    File booksDir = new File(getFilesDir(), "books");
+                    if (!booksDir.exists()) booksDir.mkdirs();
+                    java.util.Set<String> incomingKeys = Backup.readBookKeys(
+                            new java.io.ByteArrayInputStream(zip));
+                    java.util.Set<String> existing = new java.util.HashSet<String>();
+                    File[] dirs = booksDir.listFiles();
+                    if (dirs != null) for (File d : dirs) if (d.isDirectory()) existing.add(d.getName());
+                    for (String k : incomingKeys) {
+                        if (existing.contains(k)) skipped++; else added++;
+                    }
+                    Backup.restoreBooks(new java.io.ByteArrayInputStream(zip), booksDir, existing);
+                } catch (Exception e) {
+                    err = e.getMessage() == null ? e.toString() : e.getMessage();
+                } finally {
+                    if (in != null) try {
+                        in.close();
+                    } catch (Exception ignored) {
+                    }
+                }
+                final String errMsg = err;
+                final int pN = prefsN, aN = added, sN = skipped;
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (errMsg != null) {
+                            toast("恢复失败：" + errMsg);
+                            return;
+                        }
+                        // 书恢复后重扫书架
+                        loadShelf(false);
+                        refreshMeRows();
+                        toast("恢复完成：新增 " + aN + " 本书" + (sN > 0 ? "（跳过 " + sN + " 本已有）" : "")
+                                + "，" + pN + " 项进度/书签/设置");
+                    }
+                });
+            }
+        }).start();
+    }
+
     private static boolean writeText(File f, String text) {
         java.io.Writer w = null;
         try {
@@ -1545,6 +1728,22 @@ public class MainActivity extends Activity {
         } finally {
             if (w != null) try {
                 w.close();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private static boolean writeBytes(File f, byte[] data) {
+        java.io.OutputStream out = null;
+        try {
+            out = new java.io.FileOutputStream(f);
+            out.write(data);
+            return true;
+        } catch (Exception e) {
+            return false;
+        } finally {
+            if (out != null) try {
+                out.close();
             } catch (Exception ignored) {
             }
         }
@@ -1740,6 +1939,16 @@ public class MainActivity extends Activity {
         if (requestCode == REQ_IMPORT_BM && resultCode == RESULT_OK && data != null
                 && data.getData() != null) {
             importBookmarksFrom(data.getData());
+            return;
+        }
+        if (requestCode == REQ_EXPORT_BACKUP && resultCode == RESULT_OK && data != null
+                && data.getData() != null) {
+            writeBackupTo(data.getData());
+            return;
+        }
+        if (requestCode == REQ_IMPORT_BACKUP && resultCode == RESULT_OK && data != null
+                && data.getData() != null) {
+            restoreBackupFrom(data.getData());
             return;
         }
         if (requestCode == REQ_EINK && resultCode == RESULT_OK) {

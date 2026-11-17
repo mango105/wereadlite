@@ -270,4 +270,72 @@ public final class Store {
         }
         ed.commit();
     }
+
+    // ---------------- 整包备份 / 恢复 ----------------
+
+    /** 导出需要备份的偏好：进度、书签、设置。会话/授权凭证不导出。 */
+    public java.util.Map<String, String> exportWantedPrefs() {
+        java.util.Map<String, String> out = new java.util.LinkedHashMap<String, String>();
+        for (java.util.Map.Entry<String, ?> e : sp.getAll().entrySet()) {
+            String k = e.getKey();
+            if (!Backup.wantedPref(k) || e.getValue() == null) continue;
+            out.put(k, String.valueOf(e.getValue()));
+        }
+        return out;
+    }
+
+    /**
+     * 合并导入的偏好，返回实际应用了多少项。
+     * - 阅读位置 lp_ / mk_：谁的时间戳新用谁；
+     * - 阅读时长 rt_：取较大值（累计时长不该倒退）；
+     * - 书签 bm_：用 Bookmarks.merge 按位置合并去重，不覆盖本地已有的；
+     * - 其余设置：直接覆盖（用户主动导入就是想恢复这套设置）。
+     */
+    public int mergeImportedPrefs(java.util.Map<String, String> incoming) {
+        if (incoming == null || incoming.isEmpty()) return 0;
+        SharedPreferences.Editor ed = sp.edit();
+        int n = 0;
+        for (java.util.Map.Entry<String, String> e : incoming.entrySet()) {
+            String k = e.getKey();
+            String v = e.getValue();
+            if (!Backup.wantedPref(k) || v == null) continue;
+            if (k.startsWith("lp_")) {
+                if (newerPos(sp.getString(k, ""), v)) { ed.putString(k, v); n++; }
+            } else if (k.startsWith("mk_")) {
+                // mk_ 是 Resume 编码串，没有独立时间戳，按字符串不同就取导入的（同步结果）
+                if (!v.equals(sp.getString(k, ""))) { ed.putString(k, v); n++; }
+            } else if (k.startsWith("rt_")) {
+                int cur = sp.getInt(k, -1);
+                int val = Store.parseInt(v);
+                if (val > cur) { ed.putInt(k, val); n++; }
+            } else if (k.startsWith("bm_")) {
+                String bookId = k.substring(3);
+                java.util.List<Bookmarks.Item> merged = Bookmarks.merge(
+                        Bookmarks.decode(sp.getString(k, "")), Bookmarks.decode(v));
+                String enc = Bookmarks.encode(merged);
+                if (!enc.equals(sp.getString(k, ""))) { ed.putString(k, enc); n++; }
+            } else {
+                // 设置项：值可能是"true"/数字，按原类型写回
+                Object cur = sp.getAll().get(k);
+                if (cur instanceof Boolean) ed.putBoolean(k, Boolean.parseBoolean(v));
+                else if (cur instanceof Integer) ed.putInt(k, Store.parseInt(v));
+                else ed.putString(k, v);
+                n++;
+            }
+        }
+        ed.commit();
+        return n;
+    }
+
+    /** 比较两个 "idx|off|毫秒" 位置串，b 的时间戳更新则返回 true。 */
+    private static boolean newerPos(String a, String b) {
+        long ta = Store.parseLong(posTime(a));
+        long tb = Store.parseLong(posTime(b));
+        return tb > ta;
+    }
+
+    private static String posTime(String s) {
+        String[] parts = s == null ? new String[0] : s.split("\\|", -1);
+        return parts.length >= 3 ? parts[2] : "";
+    }
 }

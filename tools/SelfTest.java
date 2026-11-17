@@ -33,6 +33,7 @@ public class SelfTest {
         testTxt();
         testEpub();
         testBookmarks();
+        testBackup();
         System.out.println("---- " + passed + " passed, " + failed + " failed");
         if (failed > 0) System.exit(1);
     }
@@ -659,5 +660,113 @@ public class SelfTest {
         byte[] b = text.getBytes("UTF-8");
         z.write(b, 0, b.length);
         z.closeEntry();
+    }
+
+    // ---------- Backup 整包备份 ----------
+
+    static void testBackup() throws Exception {
+        // 会话/凭证键必须被排除，进度/书签/设置要保留
+        yes("backup want lp", Backup.wantedPref("lp_local:123"));
+        yes("backup want bm", Backup.wantedPref("bm_local:123"));
+        yes("backup want rt", Backup.wantedPref("rt_local:123"));
+        yes("backup want mk", Backup.wantedPref("mk_local:123"));
+        yes("backup want fontSize", Backup.wantedPref("fontSize"));
+        yes("backup want indent", Backup.wantedPref("indentCells"));
+        yes("backup NO cookies", !Backup.wantedPref("cookies"));
+        yes("backup NO skey", !Backup.wantedPref("skey"));
+        yes("backup NO vid", !Backup.wantedPref("vid"));
+        yes("backup NO einkCred", !Backup.wantedPref("einkCred"));
+        yes("backup NO syncedAt", !Backup.wantedPref("syncedAt"));
+
+        // 造两本假书
+        File root = new File(System.getProperty("java.io.tmpdir"),
+                "wl-backup-test-" + System.currentTimeMillis());
+        File d1 = new File(root, "bk1");
+        File d2 = new File(root, "bk2");
+        d1.mkdirs(); d2.mkdirs();
+        write(new File(d1, "meta.json"), "{\"title\":\"甲\"}".getBytes("UTF-8"));
+        write(new File(d1, "ch0.txt"), "第一章正文甲乙丙丁".getBytes("UTF-8"));
+        write(new File(d2, "meta.json"), "{\"title\":\"乙\"}".getBytes("UTF-8"));
+        write(new File(d2, "ch0.txt"), "第二章正文戊己庚辛".getBytes("UTF-8"));
+
+        java.util.Map<String, String> prefs = new java.util.LinkedHashMap<String, String>();
+        prefs.put("fontSize", "24");
+        prefs.put("indentCells", "6");
+        prefs.put("lp_local:bk1", "3|120|1700000000000");
+        prefs.put("bm_local:bk1", Bookmarks.encode(java.util.Arrays.asList(
+                new Bookmarks.Item("0", "甲", 0, 12, "摘录", 1700000000000L))));
+
+        java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+        Backup.write(bos, root, prefs, "0.2.8", 1700000000000L);
+        byte[] zip = bos.toByteArray();
+        yes("backup zip bytes", zip.length > 100);
+
+        // meta 可读
+        java.util.Map<String, Object> meta = Backup.readMeta(
+                new java.io.ByteArrayInputStream(zip));
+        yes("backup meta format", Json.num(meta, "format") == 1);
+        yes("backup meta books", Json.num(meta, "books") == 2);
+        yes("backup meta prefs", Json.num(meta, "prefs") == 4);
+
+        // prefs 可读，且会话没混进去
+        java.util.Map<String, String> got = Backup.readPrefs(
+                new java.io.ByteArrayInputStream(zip));
+        yes("backup prefs fontSize", "24".equals(got.get("fontSize")));
+        yes("backup prefs indent", "6".equals(got.get("indentCells")));
+        yes("backup prefs lp", got.containsKey("lp_local:bk1"));
+        yes("backup prefs bm", got.containsKey("bm_local:bk1"));
+        yes("backup prefs no cookies", !got.containsKey("cookies"));
+
+        // 书 key 可枚举
+        java.util.Set<String> keys = Backup.readBookKeys(
+                new java.io.ByteArrayInputStream(zip));
+        yes("backup book keys size", keys.size() == 2);
+        yes("backup book keys has bk1", keys.contains("bk1"));
+        yes("backup book keys has bk2", keys.contains("bk2"));
+
+        // 恢复：bk1 已存在要跳过，只写 bk2
+        java.util.Set<String> existing = new java.util.HashSet<String>();
+        existing.add("bk1");
+        File dst = new File(root, "restore");
+        dst.mkdirs();
+        int written = Backup.restoreBooks(new java.io.ByteArrayInputStream(zip), dst, existing);
+        yes("backup restore wrote bk2 files", written == 2);   // meta.json + ch0.txt
+        yes("backup restore skipped bk1", !new File(dst, "bk1").exists());
+        yes("backup restore has bk2", new File(dst, "bk2/ch0.txt").exists());
+        String text = new String(readAllBytes(new File(dst, "bk2/ch0.txt")), "UTF-8");
+        yes("backup restore content", text.contains("戊己庚辛"));
+
+        // 目录穿越防护
+        java.io.ByteArrayOutputStream evilBos = new java.io.ByteArrayOutputStream();
+        ZipOutputStream ez = new ZipOutputStream(evilBos);
+        put(ez, "books/../../evil.txt", "bad");
+        ez.finish();
+        File dst2 = new File(root, "evil");
+        dst2.mkdirs();
+        int evilWritten = Backup.restoreBooks(
+                new java.io.ByteArrayInputStream(evilBos.toByteArray()), dst2,
+                new java.util.HashSet<String>());
+        yes("backup path traversal blocked", evilWritten == 0);
+
+        deleteTree(root);
+    }
+
+    static byte[] readAllBytes(File f) {
+        try {
+            java.io.ByteArrayOutputStream b = new java.io.ByteArrayOutputStream();
+            java.io.FileInputStream in = new java.io.FileInputStream(f);
+            byte[] c = new byte[4096]; int n;
+            while ((n = in.read(c)) > 0) b.write(c, 0, n);
+            in.close();
+            return b.toByteArray();
+        } catch (Exception e) { throw new RuntimeException(e); }
+    }
+
+    static void deleteTree(File f) {
+        File[] kids = f.listFiles();
+        if (kids != null) for (File k : kids) {
+            if (k.isDirectory()) deleteTree(k); else k.delete();
+        }
+        f.delete();
     }
 }

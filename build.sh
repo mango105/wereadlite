@@ -14,8 +14,8 @@ KEYSTORE="$ROOT/weread.keystore"
 # 签名口令：公开仓库里不写死，本地不设环境变量时仍用默认值，构建行为不变
 KS_PASS="${KS_PASS:-wereadlite}"
 KS_ALIAS="${KS_ALIAS:-wereadlite}"
-VERSION_NAME="0.2.8"
-VERSION_CODE="28"
+VERSION_NAME="0.2.9"
+VERSION_CODE="29"
 # MIN_SDK=17 对应 Android 4.2；MIN_SDK=14 可装到 Android 4.0+
 MIN_SDK="${MIN_SDK:-17}"
 TARGET_SDK=28

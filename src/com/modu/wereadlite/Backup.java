@@ -40,10 +40,13 @@ public final class Backup {
     static boolean wantedPref(String k) {
         if (k == null) return false;
         return k.startsWith("lp_") || k.startsWith("mk_") || k.startsWith("rt_")
-                || k.startsWith("bm_")
+                || k.startsWith("bm_") || k.startsWith("rd_") || k.equals("einkRead")
+                || k.startsWith("pd_") || k.startsWith("pl_at_")
+                || k.startsWith("ps_at_") || k.startsWith("se_")
                 || k.equals("fontSize") || k.equals("indentCells") || k.equals("linePct")
                 || k.equals("marginDp") || k.equals("volumePaging")
-                || k.equals("progressWholeBook") || k.equals("keepAwake") || k.equals("compat");
+                || k.equals("progressWholeBook") || k.equals("keepAwake") || k.equals("compat")
+                || k.equals("syncOnOpen") || k.equals("syncOnClose") || k.equals("paraGap");
     }
 
     private Backup() {

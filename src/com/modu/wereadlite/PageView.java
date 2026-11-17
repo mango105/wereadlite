@@ -11,6 +11,7 @@ import android.text.StaticLayout;
 import android.text.TextPaint;
 import android.text.TextUtils;
 import android.text.style.LeadingMarginSpan;
+import android.text.style.LineHeightSpan;
 import android.util.TypedValue;
 import android.view.MotionEvent;
 import android.view.View;
@@ -57,6 +58,7 @@ public class PageView extends View {
     private int footerHeight;
     /** 首行缩进，按半角格算：2 格 = 1 个汉字，4 格即标准的两字缩进。 */
     private int indentCells = 4;
+    private boolean paraGap;
     private StaticLayout layout;
     private int layoutStart = -1;
     /** 页脚是否绘制：工具条弹起时隐藏，但不改变正文区域。 */
@@ -129,6 +131,17 @@ public class PageView extends View {
 
     public int indentCells() {
         return indentCells;
+    }
+
+    /** 段间距：段落之间留一条窄空白，不改字符、不影响进度偏移。 */
+    public void setParaGap(boolean on) {
+        if (paraGap == on) return;
+        paraGap = on;
+        reflow();
+    }
+
+    public boolean paraGap() {
+        return paraGap;
     }
 
     /** 字号/行距/边距/缩进变化后重新分页，并保持当前阅读位置。 */
@@ -317,18 +330,29 @@ public class PageView extends View {
      */
     private CharSequence styledParagraphs(int start, int end) {
         CharSequence raw = text.subSequence(start, end);
-        if (indentCells <= 0 || start >= end) return raw;
+        if (start >= end) return raw;
+        boolean doIndent = indentCells > 0;
+        if (!doIndent && !paraGap) return raw;
         SpannableStringBuilder ssb = new SpannableStringBuilder(raw);
         int n = ssb.length();
         int want = (int) (paint.getTextSize() * 0.5f * indentCells + 0.5f);
+        int gap = (int) (paint.getTextSize() * 0.28f + 0.5f);
         int para = 0;
         boolean fresh = start == 0 || text.charAt(start - 1) == '\n';
         for (int i = 0; i <= n; i++) {
             if (i < n && ssb.charAt(i) != '\n') continue;
             if (fresh && i > para) {
-                int extra = want - leadingBlankWidth(ssb, para, i);
-                if (extra > 0) {
-                    ssb.setSpan(new LeadingMarginSpan.Standard(extra, 0), para, i,
+                if (doIndent) {
+                    int extra = want - leadingBlankWidth(ssb, para, i);
+                    if (extra > 0) {
+                        ssb.setSpan(new LeadingMarginSpan.Standard(extra, 0), para, i,
+                                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                    }
+                }
+                // 段间距加在段首第一个字符上（不是页首第一段），抬高行顶留白。
+                // LineHeightSpan 只改绘制高度，不改变字符数，进度偏移完全不受影响。
+                if (paraGap && para < n) {
+                    ssb.setSpan(new ParaGapSpan(gap), para, para + 1,
                             Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                 }
             }
@@ -336,6 +360,22 @@ public class PageView extends View {
             fresh = true;
         }
         return ssb;
+    }
+
+    /** 段首行顶部留白；只调字体度量，不动文本长度。 */
+    private static final class ParaGapSpan implements LineHeightSpan {
+        private final int gap;
+
+        ParaGapSpan(int gap) {
+            this.gap = gap;
+        }
+
+        @Override
+        public void chooseHeight(CharSequence text, int start, int end,
+                                 int spanStart, int spanEnd, Paint.FontMetricsInt fm) {
+            fm.ascent -= gap;
+            fm.top -= gap;
+        }
     }
 
     /** 段落开头已有空白占多宽（半角空格 / 全角空格 / Tab / 不换行空格）。 */

@@ -34,6 +34,11 @@ final class NavIcon extends View {
     static final int INFO = 21;
     static final int BOOKMARK = 22;
     static final int OPENBOOK = 23;
+    static final int HEADPHONE = 24;   // 听书
+    static final int PEN = 25;         // 笔记 / 想法
+    static final int CLOUD = 26;       // 云同步
+    static final int BOOKMARK_PLUS = 27; // 加书签
+    static final int BOOKLIST = 28;    // 书单 / 章节列表
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path path = new Path();
@@ -286,6 +291,59 @@ final class NavIcon extends View {
                 path.lineTo(15.8f, 5.8f);
                 path.close();
                 canvas.drawPath(path, paint);
+                break;
+            case HEADPHONE:
+                // 头梁 + 左右耳罩
+                path.moveTo(5.4f, 14f);
+                path.lineTo(5.4f, 11.4f);
+                path.quadTo(5.4f, 4.6f, 12f, 4.6f);
+                path.quadTo(18.6f, 4.6f, 18.6f, 11.4f);
+                path.lineTo(18.6f, 14f);
+                canvas.drawPath(path, paint);
+                canvas.drawRoundRect(new RectF(3.4f, 13.2f, 7.6f, 19.4f), 1.8f, 1.8f, paint);
+                canvas.drawRoundRect(new RectF(16.4f, 13.2f, 20.6f, 19.4f), 1.8f, 1.8f, paint);
+                break;
+            case PEN:
+                // 斜置的钢笔 + 一笔下划线
+                path.moveTo(5.2f, 18.8f);
+                path.lineTo(6.2f, 14.6f);
+                path.lineTo(16.6f, 4.2f);
+                path.quadTo(18f, 3f, 19.4f, 4.4f);
+                path.quadTo(20.6f, 5.8f, 19.4f, 7.2f);
+                path.lineTo(9f, 17.6f);
+                path.close();
+                canvas.drawPath(path, paint);
+                canvas.drawLine(4.4f, 21f, 13f, 21f, paint);
+                break;
+            case CLOUD:
+                path.moveTo(7.4f, 18.4f);
+                path.quadTo(3.6f, 18.4f, 3.6f, 14.6f);
+                path.quadTo(3.6f, 11.4f, 6.6f, 10.8f);
+                path.quadTo(7.4f, 6.4f, 12f, 6.4f);
+                path.quadTo(16.8f, 6.4f, 17.4f, 10.8f);
+                path.quadTo(20.4f, 11.2f, 20.4f, 14.4f);
+                path.quadTo(20.4f, 18.4f, 16.6f, 18.4f);
+                canvas.drawPath(path, paint);
+                break;
+            case BOOKMARK_PLUS:
+                path.moveTo(6.4f, 3.6f);
+                path.lineTo(17.6f, 3.6f);
+                path.lineTo(17.6f, 19.6f);
+                path.lineTo(12f, 15.2f);
+                path.lineTo(6.4f, 19.6f);
+                path.close();
+                canvas.drawPath(path, paint);
+                paint.setStrokeWidth(1.3f);
+                canvas.drawLine(12f, 7.4f, 12f, 12.6f, paint);
+                canvas.drawLine(9.7f, 10f, 14.3f, 10f, paint);
+                break;
+            case BOOKLIST:
+                canvas.drawRoundRect(new RectF(4f, 4f, 16.4f, 19.4f), 1f, 1f, paint);
+                canvas.drawLine(7f, 8.4f, 13.4f, 8.4f, paint);
+                canvas.drawLine(7f, 12f, 13.4f, 12f, paint);
+                canvas.drawLine(7f, 15.6f, 11f, 15.6f, paint);
+                canvas.drawLine(18.4f, 5f, 18.4f, 18f, paint);
+                canvas.drawLine(20.6f, 6.6f, 20.6f, 16.4f, paint);
                 break;
             default:
                 break;

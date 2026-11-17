@@ -9,6 +9,9 @@ import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
 import android.os.Bundle;
 import android.os.Handler;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
+import android.text.style.StyleSpan;
 import android.text.TextUtils;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -70,6 +73,8 @@ public class MainActivity extends Activity {
     private TextView labelShelf;
     private TextView labelMe;
     private LinearLayout meRows;
+    private TextView statMain;
+    private TextView statSub;
     private ScrollView shelfScroll;
     private ScrollView discoverScroll;
     private LinearLayout recentRow;
@@ -668,6 +673,25 @@ public class MainActivity extends Activity {
         box.addView(line, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 1));
 
+        // 阅读统计卡片：累计 / 墨水屏 / 本周，对齐官方「我」页顶部样式
+        LinearLayout statBox = new LinearLayout(this);
+        statBox.setOrientation(LinearLayout.VERTICAL);
+        statBox.setPadding(0, dp(16), 0, dp(14));
+        statMain = Ui.text(this, "", 15.5f, Ui.INK);
+        statMain.setPadding(0, 0, 0, dp(5));
+        statBox.addView(statMain, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        statSub = Ui.text(this, "", 11.5f, Ui.LIGHT);
+        statBox.addView(statSub, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        box.addView(statBox, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        View line2 = new View(this);
+        line2.setBackgroundColor(Ui.LINE);
+        box.addView(line2, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 1));
+
         meRows = new LinearLayout(this);
         meRows.setOrientation(LinearLayout.VERTICAL);
         box.addView(meRows);
@@ -685,6 +709,7 @@ public class MainActivity extends Activity {
     }
 
     private void refreshMeRows() {
+        refreshStats();
         meRows.removeAllViews();
         meRows.addView(meRow("书架", books.size() + " 本", new View.OnClickListener() {
             @Override
@@ -704,40 +729,14 @@ public class MainActivity extends Activity {
                 toast("正在同步书架…");
             }
         }));
-        TextView tip = Ui.text(this,
-                "想在别的设备读自己的书？用微信读书 App「传书」到云端，"
-                        + "回来点上面「同步书架」即可。"
-                        + "本机导入的 TXT / EPUB 只存于本设备。",
-                11f, Ui.LIGHT);
-        tip.setLineSpacing(dp(4), 1f);
-        tip.setPadding(0, dp(8), 0, dp(6));
-        meRows.addView(tip, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        meRows.addView(meRow("导出书签", store.bookmarkCount() + " 条",
+        // 书签 / 备份合并为一个入口，点开用选项弹窗承载，保持页面清爽
+        meRows.addView(meRow("数据与备份", "书签 · 备份 · 恢复",
                 new View.OnClickListener() {
                     @Override
                     public void onClick(View v) {
-                        exportBookmarks();
+                        showDataMenu();
                     }
                 }));
-        meRows.addView(meRow("导入书签", "合并，不覆盖", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                pickBookmarkImport();
-            }
-        }));
-        meRows.addView(meRow("备份到本地", "书 + 进度 + 书签", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                exportBackup();
-            }
-        }));
-        meRows.addView(meRow("从备份恢复", "换机 / 重装后用", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                pickBackupImport();
-            }
-        }));
         if (offline && !api.loggedIn()) {
             meRows.addView(meRow("登录微信读书", "同步云端书架", new View.OnClickListener() {
                 @Override
@@ -755,18 +754,6 @@ public class MainActivity extends Activity {
                                 new Intent(MainActivity.this, EinkLoginActivity.class), REQ_EINK);
                     }
                 }));
-        meRows.addView(meRow("阅读设置", store.fontSize() + " pt", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                openSettings();
-            }
-        }));
-        meRows.addView(meRow("设置", "", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                openSettings();
-            }
-        }));
         meRows.addView(meRow("关于", "", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -778,6 +765,63 @@ public class MainActivity extends Activity {
                         .show();
             }
         }));
+    }
+
+    /** 「数据与备份」统一入口：书签导入导出、整包备份恢复。 */
+    private void showDataMenu() {
+        final String[] items = new String[] {
+                "备份到本地（书 + 进度 + 书签）",
+                "从备份恢复",
+                "导出书签（" + store.bookmarkCount() + " 条）",
+                "导入书签（合并，不覆盖）"
+        };
+        new AlertDialog.Builder(this)
+                .setTitle("数据与备份")
+                .setItems(items, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        switch (which) {
+                            case 0: exportBackup(); break;
+                            case 1: pickBackupImport(); break;
+                            case 2: exportBookmarks(); break;
+                            case 3: pickBookmarkImport(); break;
+                            default: break;
+                        }
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    /** 刷新「我」页顶部阅读统计：累计 / 墨水屏 / 本周。 */
+    private void refreshStats() {
+        if (statMain == null || statSub == null) return;
+        long total = store.totalReadTime();
+        int eink = store.einkReadTime();
+        int week = store.weekReadTime();
+        statMain.setText(boldStat("累计阅读 ", Ui.duration((int) Math.min(total, Integer.MAX_VALUE))));
+
+        SpannableStringBuilder sub = new SpannableStringBuilder();
+        appendStat(sub, "在墨水屏阅读 ", Ui.duration(eink));
+        sub.append("  |  ");
+        appendStat(sub, "本周阅读 ", Ui.duration(week));
+        statSub.setText(sub);
+    }
+
+    /** 生成「普通标签 + 加粗值」的一段文字。 */
+    private SpannableStringBuilder boldStat(String label, String value) {
+        SpannableStringBuilder s = new SpannableStringBuilder();
+        appendStat(s, label, value);
+        return s;
+    }
+
+    private void appendStat(SpannableStringBuilder s, String label, String value) {
+        int start = s.length();
+        s.append(label);
+        int valueStart = s.length();
+        s.append(value);
+        s.setSpan(new StyleSpan(android.graphics.Typeface.BOLD), valueStart, s.length(),
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
     }
 
     private View meRow(String label, String value, View.OnClickListener click) {

@@ -197,6 +197,15 @@ final class SeekRow extends View {
         if (listener != null) listener.onValue(v);
     }
 
+    /** 供外侧的圆形 +/− 按钮调用：走一档并立即提交，行为和拖动松手一致。 */
+    void nudge(int dir) {
+        int next = value + dir * step;
+        next = Math.max(min, Math.min(max, next));
+        if (next == value) return;
+        set(next);
+        if (listener != null) listener.onCommit(value);
+    }
+
     @Override
     public boolean performClick() {
         return super.performClick();

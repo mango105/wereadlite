@@ -200,6 +200,24 @@ public class SettingsActivity extends Activity {
                 + "未读章节的页数按字数估算，读到时自动校正。\n"
                 + "按章：只显示本章第几页、本章内进度。"));
 
+        box.addView(section("云端进度同步"));
+        box.addView(toggleRow("开书时拉取云端进度", store.syncOnOpen(), new Toggle.OnChange() {
+            @Override
+            public void onChange(boolean checked) {
+                store.setSyncOnOpen(checked);
+            }
+        }));
+        box.addView(toggleRow("关书时上传本地进度", store.syncOnClose(), new Toggle.OnChange() {
+            @Override
+            public void onChange(boolean checked) {
+                store.setSyncOnClose(checked);
+            }
+        }));
+        box.addView(note("两项默认关闭。开启后：开书先对齐云端进度，关书把本地进度回传，"
+                + "多设备交替阅读不丢位置。差异 ≤2% 视为同一位置；两端真的冲突时会在阅读页弹窗，"
+                + "由你决定用哪一端。阅读页底部工具条也有「立即同步」按钮，随时手动对比一次。\n"
+                + "只对本 App 内打开的在线书籍生效；本地导入的书不参与云端同步。"));
+
         box.addView(section("翻页"));
         box.addView(toggleRow("使用音量键翻页", store.volumePaging(), new Toggle.OnChange() {
             @Override

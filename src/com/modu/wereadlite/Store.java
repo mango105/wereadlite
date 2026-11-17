@@ -10,8 +10,13 @@ public final class Store {
     private final SharedPreferences sp;
 
     public Store(Context ctx) {
-        sp = ctx.getSharedPreferences(NAME, Context.MODE_PRIVATE);
+        this(ctx.getSharedPreferences(NAME, Context.MODE_PRIVATE));
         Trace.init(ctx);
+    }
+
+    /** 包内注入用：SelfTest 传内存 SharedPreferences，脱离 Android 跑统计/合并回归。 */
+    Store(SharedPreferences sp) {
+        this.sp = sp;
     }
 
     private String get(String k) {
@@ -74,6 +79,14 @@ public final class Store {
 
     public void setIndentCells(int v) {
         sp.edit().putInt("indentCells", v).commit();
+    }
+
+    public boolean paraGap() {
+        return sp.getBoolean("paraGap", false);
+    }
+
+    public void setParaGap(boolean v) {
+        sp.edit().putBoolean("paraGap", v).commit();
     }
 
     /** 行距百分比，116 = 1.16 倍。旧版本存的是 0/1/2 档位，这里做一次迁移。 */
@@ -188,6 +201,63 @@ public final class Store {
         ed.commit();
     }
 
+    // ---------------- 进度双向同步 ----------------
+
+    /** 开书时从云端拉取进度并对比。默认关：自动写云端前先让用户确认位置映射可用。 */
+    public boolean syncOnOpen() {
+        return sp.getBoolean("syncOnOpen", false);
+    }
+
+    public void setSyncOnOpen(boolean v) {
+        sp.edit().putBoolean("syncOnOpen", v).commit();
+    }
+
+    /** 关书时若本地有变动就上传进度。默认关。 */
+    public boolean syncOnClose() {
+        return sp.getBoolean("syncOnClose", false);
+    }
+
+    public void setSyncOnClose(boolean v) {
+        sp.edit().putBoolean("syncOnClose", v).commit();
+    }
+
+    /**
+     * 待上传的本地位置快照（uid|offset|idx|percent|summary）。上传前先落盘，
+     * 断网或进程被杀后仍可追溯；上传成功后由 clearPendingPos 清掉。
+     */
+    public void setPendingPos(String bookId, String snap) {
+        put("pd_" + bookId, snap);
+    }
+
+    public String pendingPos(String bookId) {
+        return get("pd_" + bookId);
+    }
+
+    public void clearPendingPos(String bookId) {
+        put("pd_" + bookId, "");
+    }
+
+    /** 最近一次成功拉取 / 上传云端进度的时刻，排查「上次同步发生了什么」用。 */
+    public long pulledAt(String bookId) {
+        return sp.getLong("pl_at_" + bookId, 0L);
+    }
+
+    public long pushedAt(String bookId) {
+        return sp.getLong("ps_at_" + bookId, 0L);
+    }
+
+    public String syncError(String bookId) {
+        return get("se_" + bookId);
+    }
+
+    public void setSyncState(String bookId, long pulled, long pushed, String error) {
+        SharedPreferences.Editor ed = sp.edit();
+        if (pulled > 0L) ed.putLong("pl_at_" + bookId, pulled);
+        if (pushed > 0L) ed.putLong("ps_at_" + bookId, pushed);
+        ed.putString("se_" + bookId, error == null ? "" : error);
+        ed.commit();
+    }
+
     /** E-Ink 客户端授权凭证（JSON：vid/accessToken/refreshToken/deviceId）。 */
     public String einkCred() {
         return get("einkCred");
@@ -271,6 +341,54 @@ public final class Store {
         ed.commit();
     }
 
+    // ---------------- 阅读统计（我 / 页顶部卡片） ----------------
+
+    /** 累计阅读秒数：所有书云端累计时长之和（全平台口径，来自书架 bookProgress）。 */
+    public long totalReadTime() {
+        long sum = 0;
+        for (java.util.Map.Entry<String, ?> e : sp.getAll().entrySet()) {
+            String k = e.getKey();
+            if (k.startsWith("rt_") && e.getValue() instanceof Integer) {
+                int v = (Integer) e.getValue();
+                if (v > 0) sum += v;
+            }
+        }
+        return sum;
+    }
+
+    /** 本 App（墨水屏）累计阅读秒数。 */
+    public int einkReadTime() {
+        return sp.getInt("einkRead", 0);
+    }
+
+    /**
+     * 记一段本 App 的真实阅读时长：同时累进「本 App 累计」和「当天」。
+     * 一次提交落两个键，避免两次 commit。seconds<=0 忽略。
+     */
+    public void noteRead(int seconds) {
+        if (seconds <= 0) return;
+        String day = new java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.CHINA)
+                .format(new java.util.Date());
+        String dk = "rd_" + day;
+        SharedPreferences.Editor ed = sp.edit();
+        ed.putInt("einkRead", sp.getInt("einkRead", 0) + seconds);
+        ed.putInt(dk, sp.getInt(dk, 0) + seconds);
+        ed.commit();
+    }
+
+    /** 本周（含今天往前 7 天）本 App 阅读秒数之和。 */
+    public int weekReadTime() {
+        java.util.Calendar c = java.util.Calendar.getInstance(java.util.Locale.CHINA);
+        java.text.SimpleDateFormat f =
+                new java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.CHINA);
+        int sum = 0;
+        for (int i = 0; i < 7; i++) {
+            sum += sp.getInt("rd_" + f.format(c.getTime()), 0);
+            c.add(java.util.Calendar.DAY_OF_MONTH, -1);
+        }
+        return sum;
+    }
+
     // ---------------- 整包备份 / 恢复 ----------------
 
     /** 导出需要备份的偏好：进度、书签、设置。会话/授权凭证不导出。 */
@@ -308,6 +426,16 @@ public final class Store {
                 int cur = sp.getInt(k, -1);
                 int val = Store.parseInt(v);
                 if (val > cur) { ed.putInt(k, val); n++; }
+            } else if (k.startsWith("rd_") || k.equals("einkRead")) {
+                // 阅读统计是 int，按较大值合并（累计时长不该倒退）；不能走 else 的字符串写回
+                int cur = sp.getInt(k, 0);
+                int val = Store.parseInt(v);
+                if (val > cur) { ed.putInt(k, val); n++; }
+            } else if (k.startsWith("pl_at_") || k.startsWith("ps_at_")) {
+                // 同步时间戳是 long，按较长的写回（和进度一样取新）
+                long cur = sp.getLong(k, 0L);
+                long val = Store.parseLong(v);
+                if (val > cur) { ed.putLong(k, val); n++; }
             } else if (k.startsWith("bm_")) {
                 String bookId = k.substring(3);
                 java.util.List<Bookmarks.Item> merged = Bookmarks.merge(

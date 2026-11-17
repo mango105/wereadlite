@@ -64,6 +64,18 @@ public final class Json {
         return "";
     }
 
+    /** 取长整型数值；时间戳这类超过 int 范围的字段必须用这个，避免 intValue 溢出。 */
+    public static long longNum(Object o, String key) {
+        if (!(o instanceof Map)) return 0L;
+        Object v = asMap(o).get(key);
+        if (v instanceof Number) return ((Number) v).longValue();
+        try {
+            return Long.parseLong(String.valueOf(v));
+        } catch (Exception e) {
+            return 0L;
+        }
+    }
+
     public static int num(Object o, String key) {
         if (!(o instanceof Map)) return 0;
         Object v = asMap(o).get(key);

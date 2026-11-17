@@ -1,6 +1,7 @@
 package com.modu.wereadlite;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Color;
@@ -24,6 +25,7 @@ import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ListView;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -42,17 +44,33 @@ public class ReaderActivity extends Activity implements PageView.Callback {
     private TextView overlay;
 
     private View toolbar;
-    private FrameLayout menuDot;
+    private View topToolbar;
+    private FrameLayout rootView;
+    private View notesPanel;
     private View displayPanel;
+    private View paraPanel;
+    private TextView paraCardFlush;
+    private TextView paraCardIndent;
     private View progressPanel;
     private SeekRow progressRow;
     private TextView progressPercent;
     private TextView progressPages;
     private TextView progressChapter;
     private TextView progressHint;
+    private TextView autoFlipBtn;
+    private boolean autoFlipping;
+    private final Runnable autoFlipTick = new Runnable() {
+        @Override
+        public void run() {
+            if (!autoFlipping) return;
+            onNextChapter();
+            ui.postDelayed(this, 12000);   // 每 12 秒翻一页，留足阅读时间
+        }
+    };
     private View tocPanel;
     private View tocDim;
     private TextView tocAuthor;
+    private TextView tocTitleView;
     private ListView tocList;
     private EditText tocSearch;
     private SeekRow fontRow;
@@ -93,6 +111,8 @@ public class ReaderActivity extends Activity implements PageView.Callback {
     private Api.Context ctx;
     /** 上次上报的时刻。rt 要报「距上次上报读了多久」，报开场至今云端时长会成倍增加。 */
     private long sinceReport;
+    /** 正在同步时避免开书/手动/关书三条链路重入。 */
+    private volatile boolean syncing;
     private int loadToken;
     private boolean demo;
     private final Handler ui = new Handler();
@@ -139,12 +159,12 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         page.setOrientation(LinearLayout.VERTICAL);
         page.setBackgroundColor(Color.WHITE);
 
-        header = Ui.text(this, bookTitle, 10.5f, 0xFF8A8A8A);
+        header = Ui.text(this, "", 10.5f, 0xFF8A8A8A);
         header.setSingleLine(true);
         header.setEllipsize(TextUtils.TruncateAt.END);
         header.setGravity(Gravity.CENTER_VERTICAL);
-        // 页眉定高，左上角按钮整个落在这一行里，不会再压到下面的正文首行
-        header.setPadding(dp(42), dp(2), dp(16), dp(2));
+        // 只显示章节名：书名底部工具栏已有，左上角返回箭头已去掉，不再需要左侧留白
+        header.setPadding(dp(16), dp(2), dp(16), dp(2));
         page.addView(header, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(34)));
 
@@ -184,6 +204,7 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         pageView.setLinePct(store.linePct());
         pageView.setMarginDp(store.marginDp());
         pageView.setIndentCells(store.indentCells());
+        pageView.setParaGap(store.paraGap());
         page.addView(pageView, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         root.addView(page, new FrameLayout.LayoutParams(
@@ -195,26 +216,16 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         root.addView(overlay, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        // 原来那颗 38dp 圆形悬浮按钮跨过页眉压住了正文首行。
-        // 现在去掉圆形描边，只留一个细箭头，并把它整个收进页眉行内。
-        menuDot = new FrameLayout(this);
-        NavIcon menuGlyph = new NavIcon(this, NavIcon.BACK);
-        menuGlyph.setInk(Ui.INK);
-        menuDot.addView(menuGlyph, new FrameLayout.LayoutParams(dp(20), dp(20), Gravity.CENTER));
-        menuDot.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                backOrMenu();
-            }
-        });
-        FrameLayout.LayoutParams dlp = new FrameLayout.LayoutParams(dp(30), dp(30),
-                Gravity.LEFT | Gravity.TOP);
-        dlp.setMargins(dp(8), dp(2), 0, 0);
-        root.addView(menuDot, dlp);
+        // 左上角返回箭头已去掉：书名/返回在底部工具栏都有，页眉只留章节名。
+        // 唤出/收起工具栏由点击正文（onMenu）承担，不再需要这颗悬浮按钮。
 
         toolbar = buildToolbar();
         root.addView(toolbar, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(44), Gravity.BOTTOM));
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(50), Gravity.BOTTOM));
+
+        topToolbar = buildTopToolbar();
+        root.addView(topToolbar, new FrameLayout.LayoutParams(
+                dp(44) * 4 + dp(6), dp(34), Gravity.TOP | Gravity.RIGHT));
 
         progressPanel = buildProgressPanel();
         FrameLayout.LayoutParams plp = new FrameLayout.LayoutParams(
@@ -229,6 +240,13 @@ public class ReaderActivity extends Activity implements PageView.Callback {
                 Gravity.BOTTOM);
         panelLp.bottomMargin = dp(44);
         root.addView(displayPanel, panelLp);
+
+        paraPanel = buildParaPanel();
+        FrameLayout.LayoutParams paraLp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM);
+        paraLp.bottomMargin = dp(44);
+        root.addView(paraPanel, paraLp);
 
         tocPanel = buildTocPanel();
         FrameLayout.LayoutParams tocLp = new FrameLayout.LayoutParams(
@@ -247,6 +265,7 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         });
         root.addView(tocDim, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        rootView = root;
         return root;
     }
 
@@ -257,52 +276,88 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         return t;
     }
 
-    /** 底部工具条：纯图标一行，和微读客户端一致，文字留给面板本身。 */
+    /** 底部工具条：对齐官方阅读态——返回 / 目录 / 进度罗盘 / 收起 / 字号 / 听书。 */
     private View buildToolbar() {
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setBackgroundColor(Color.WHITE);
         bar.setGravity(Gravity.CENTER_VERTICAL);
         bar.setVisibility(View.GONE);
-        bar.setPadding(dp(6), 0, dp(6), 0);
+        bar.setPadding(dp(2), 0, dp(2), 0);
 
+        bar.addView(barButton(NavIcon.BACK, "返回书架", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                finish();
+            }
+        }), slot());
         bar.addView(barButton(NavIcon.LIST, "目录", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 showToc(true);
             }
         }), slot());
-        bar.addView(barButton(NavIcon.BOOKMARK, "加/取消书签", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                toggleBookmark();
-            }
-        }), slot());
-        bar.addView(barButton(NavIcon.THOUGHT, "书友想法", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                openReviews();
-            }
-        }), slot());
-        bar.addView(barButton(NavIcon.PROGRESS, "阅读进度", new View.OnClickListener() {
+        bar.addView(barButton(NavIcon.COMPASS, "阅读进度", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 showProgress(true);
             }
         }), slot());
-        bar.addView(barButton(NavIcon.INFO, "书籍详情", new View.OnClickListener() {
+        bar.addView(barButton(NavIcon.DOT, "收起菜单", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                openDetail();
+                hideToolbar();
             }
         }), slot());
-        bar.addView(barButton(NavIcon.LETTER_A, "显示样式", new View.OnClickListener() {
+        bar.addView(barButton(NavIcon.LETTER_A, "字体设置", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 showDisplay(true);
             }
         }), slot());
         return bar;
+    }
+
+    /** 顶部工具条：对齐官方——加书签 / 笔记 / 书单 / 云同步。 */
+    private View buildTopToolbar() {
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setBackgroundColor(Color.WHITE);
+        bar.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT);
+        bar.setVisibility(View.GONE);
+        bar.setPadding(dp(2), 0, dp(6), 0);
+
+        bar.addView(barButton(NavIcon.BOOKMARK_PLUS, "加书签", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                toggleBookmark();
+                brief(currentHasBookmark() ? "已加书签" : "已取消书签");
+            }
+        }), topSlot());
+        bar.addView(barButton(NavIcon.PEN, "笔记", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                openNotes();
+            }
+        }), topSlot());
+        bar.addView(barButton(NavIcon.BOOKLIST, "章节目录", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showToc(true);
+            }
+        }), topSlot());
+        bar.addView(barButton(NavIcon.CLOUD, "同步云端进度", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                brief("正在同步云端进度…");
+                syncNow(Sync.TRIGGER_MANUAL);
+            }
+        }), topSlot());
+        return bar;
+    }
+
+    private LinearLayout.LayoutParams topSlot() {
+        return new LinearLayout.LayoutParams(dp(44), ViewGroup.LayoutParams.MATCH_PARENT);
     }
 
     private LinearLayout.LayoutParams slot() {
@@ -333,24 +388,29 @@ public class ReaderActivity extends Activity implements PageView.Callback {
 
         LinearLayout stats = new LinearLayout(this);
         stats.setOrientation(LinearLayout.HORIZONTAL);
-        stats.setPadding(dp(16), dp(12), dp(16), dp(2));
-        progressPercent = statCell(stats, "全书进度");
-        progressPages = statCell(stats, "本页 / 全书");
-        progressChapter = statCell(stats, "章节");
+        stats.setPadding(dp(10), dp(18), dp(10), dp(14));
+        progressPercent = statCell(stats, "阅读进度");
+        progressPages = statCell(stats, "阅读时长");
+        progressChapter = statCell(stats, "笔记");
         panel.addView(stats, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        View sep = new View(this);
+        sep.setBackgroundColor(Ui.LINE);
+        panel.addView(sep, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 1));
 
         LinearLayout slider = new LinearLayout(this);
         slider.setOrientation(LinearLayout.HORIZONTAL);
         slider.setGravity(Gravity.CENTER_VERTICAL);
         slider.setPadding(dp(6), 0, dp(6), 0);
-        slider.addView(arrowButton("‹ 上一章", new View.OnClickListener() {
+        slider.addView(arrowButton("‹", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 showProgress(false);
                 onPrevChapter();
             }
-        }), new LinearLayout.LayoutParams(dp(62), dp(40)));
+        }), new LinearLayout.LayoutParams(dp(44), dp(40)));
 
         progressRow = new SeekRow(this);
         progressRow.setRange(0, 100);
@@ -371,32 +431,71 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         });
         slider.addView(progressRow, new LinearLayout.LayoutParams(0, dp(52), 1f));
 
-        View next = arrowButton("下一章 ›", new View.OnClickListener() {
+        View next = arrowButton("›", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 showProgress(false);
                 onNextChapter();
             }
         });
-        slider.addView(next, new LinearLayout.LayoutParams(dp(62), dp(40)));
+        slider.addView(next, new LinearLayout.LayoutParams(dp(44), dp(40)));
         panel.addView(slider, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        progressHint = Ui.text(this, "拖动看在本章的位置，箭头直接切章", 10.5f, Ui.LIGHT);
+        progressHint = Ui.text(this, "", 10.5f, Ui.LIGHT);
         progressHint.setGravity(Gravity.CENTER);
-        progressHint.setPadding(0, dp(2), 0, dp(12));
+        progressHint.setPadding(0, dp(2), 0, dp(4));
         panel.addView(progressHint, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // 自动翻页按钮，对齐官方「开启自动翻页」，长按可停止
+        autoFlipBtn = flatButton("开启自动翻页", 13.5f, Ui.INK);
+        autoFlipBtn.setBackgroundDrawable(Ui.box(Color.WHITE, Ui.LINE, 1, dp(22)));
+        LinearLayout.LayoutParams abp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(42));
+        abp.setMargins(dp(20), dp(6), dp(20), dp(6));
+        autoFlipBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                toggleAutoFlip();
+            }
+        });
+        panel.addView(autoFlipBtn, abp);
+
+        TextView sync = flatButton("⇅  立即同步云端进度", 11f, Ui.LIGHT);
+        sync.setPadding(dp(12), dp(8), dp(12), dp(8));
+        sync.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showProgress(false);
+                syncNow(Sync.TRIGGER_MANUAL);
+            }
+        });
+        panel.addView(sync, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         return panel;
     }
 
-    /** 已读时长来自书架同步，本地导入的书没有，就不显示这半句。 */
+    /** 进度面板提示行：显示当前章节标题。 */
     private void bindReadTime() {
         if (progressHint == null) return;
-        String spent = Ui.duration(store.readTime(bookId));
-        progressHint.setText(spent.length() == 0
-                ? "拖动看在本章的位置，箭头直接切章"
-                : "本书已读 " + spent + " · 拖动看在本章的位置");
+        String ch = chapterTitle == null ? "" : chapterTitle;
+        progressHint.setText(ch.length() == 0 ? "拖动滑杆定位本章" : ch);
+        progressHint.setSingleLine(true);
+        progressHint.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+    }
+
+    private void toggleAutoFlip() {
+        autoFlipping = !autoFlipping;
+        if (autoFlipping) {
+            autoFlipBtn.setText("停止自动翻页");
+            ui.postDelayed(autoFlipTick, 12000);
+            brief("已开启自动翻页（每 12 秒）");
+        } else {
+            ui.removeCallbacks(autoFlipTick);
+            autoFlipBtn.setText("开启自动翻页");
+            brief("已停止自动翻页");
+        }
     }
 
     /** 进度面板顶部的一列：大数字 + 小注，返回数字那个 TextView。 */
@@ -404,7 +503,8 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
         TextView t = new TextView(this);
-        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
+        t.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         t.setTextColor(Ui.INK);
         t.setGravity(Gravity.CENTER);
         t.setText("—");
@@ -448,6 +548,206 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         startActivity(intent);
     }
 
+    private LinearLayout notesContent;
+
+    /** 图3：笔记页——顶部返回 + 标题，书籍卡片 + 我的书签 + 书友想法。 */
+    private View buildNotesPanel() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setBackgroundColor(Color.WHITE);
+        panel.setVisibility(View.GONE);
+
+        // 顶部：← 返回 + 标题
+        LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        FrameLayout back = new FrameLayout(this);
+        NavIcon arrow = new NavIcon(this, NavIcon.BACK);
+        arrow.setInk(Ui.INK);
+        back.addView(arrow, new FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER));
+        back.setPadding(dp(14), dp(12), dp(10), dp(12));
+        back.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                notesPanel.setVisibility(View.GONE);
+            }
+        });
+        top.addView(back);
+        TextView title = Ui.text(this, "笔记", 17, Ui.INK);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setPadding(dp(4), 0, dp(20), 0);
+        top.addView(title);
+        panel.addView(top, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        View line = new View(this);
+        line.setBackgroundColor(Ui.LINE);
+        panel.addView(line, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 1));
+
+        ScrollView notesScroll = new ScrollView(this);
+        notesContent = new LinearLayout(this);
+        notesContent.setOrientation(LinearLayout.VERTICAL);
+        notesScroll.addView(notesContent, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        panel.addView(notesScroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        return panel;
+    }
+
+    /** 分区小标题。 */
+    private TextView noteSection(String text) {
+        TextView t = Ui.text(this, text, 13, Ui.SUB);
+        t.setPadding(dp(18), dp(14), dp(18), dp(6));
+        return t;
+    }
+
+    /** 绑定笔记页：书籍卡片 + 我的书签（可跳转/删除）+ 书友想法入口。 */
+    private void bindNotes() {
+        if (notesContent == null) return;
+        notesContent.removeAllViews();
+
+        // 书籍卡片
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.HORIZONTAL);
+        card.setBackgroundDrawable(Ui.box(Color.WHITE, Ui.LINE, 1, dp(8)));
+        card.setPadding(dp(14), dp(14), dp(14), dp(14));
+        final android.widget.ImageView cover = new android.widget.ImageView(this);
+        cover.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP);
+        cover.setBackgroundDrawable(Ui.box(Ui.TILE, Ui.LINE, 1, dp(3)));
+        if (bookCover.length() > 0) {
+            Covers.load("notes-" + bookId, bookCover, dp(40), dp(54), new Covers.Callback() {
+                @Override
+                public void onCover(String key, android.graphics.Bitmap bitmap) {
+                    if (bitmap != null) cover.setImageBitmap(bitmap);
+                }
+            });
+        }
+        card.addView(cover, new LinearLayout.LayoutParams(dp(40), dp(54)));
+
+        LinearLayout info = new LinearLayout(this);
+        info.setOrientation(LinearLayout.VERTICAL);
+        info.setPadding(dp(12), 0, 0, 0);
+        TextView nt = Ui.text(this, bookTitle, 15, Ui.INK);
+        nt.setMaxLines(1);
+        nt.setEllipsize(TextUtils.TruncateAt.END);
+        info.addView(nt);
+        int pct = overallProgress(pageView == null ? 0 : pageView.currentOffset());
+        TextView meta = Ui.text(this, "已读到 " + pct + "% · " + marks.size() + " 条书签", 11.5f, Ui.SUB);
+        meta.setPadding(0, dp(4), 0, 0);
+        info.addView(meta);
+        String spent = Ui.duration(store.readTime(bookId));
+        TextView time = Ui.text(this, "时长 " + (spent.length() == 0 ? "0 分钟" : spent), 11.5f, Ui.SUB);
+        time.setPadding(0, dp(4), 0, 0);
+        info.addView(time);
+        card.addView(info, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout.LayoutParams ccp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        ccp.setMargins(dp(16), dp(4), dp(16), dp(6));
+        notesContent.addView(card, ccp);
+
+        // 我的书签
+        notesContent.addView(noteSection("我的书签 · " + marks.size() + " 条"));
+        if (marks.isEmpty()) {
+            TextView empty = Ui.text(this, "还没有书签。阅读时点顶部的书签图标添加。",
+                    12f, Ui.LIGHT);
+            empty.setPadding(dp(18), dp(6), dp(18), dp(8));
+            notesContent.addView(empty);
+        } else {
+            for (int i = 0; i < marks.size(); i++) {
+                final Bookmarks.Item it = marks.get(i);
+                LinearLayout row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                row.setGravity(Gravity.CENTER_VERTICAL);
+                row.setPadding(dp(18), dp(9), dp(12), dp(9));
+                row.setBackgroundDrawable(Ui.box(Color.WHITE, Ui.LINE, 1, dp(6)));
+
+                LinearLayout texts = new LinearLayout(this);
+                texts.setOrientation(LinearLayout.VERTICAL);
+                TextView excerpt = Ui.text(this,
+                        it.excerpt.length() > 0 ? it.excerpt : it.chapter, 13, Ui.INK);
+                excerpt.setMaxLines(2);
+                excerpt.setEllipsize(TextUtils.TruncateAt.END);
+                texts.addView(excerpt);
+                String chapter = it.chapter.length() > 0 ? it.chapter : "第 " + (it.idx + 1) + " 章";
+                String when = Bookmarks.timeLabel(it.at);
+                TextView sub = Ui.text(this,
+                        when.length() == 0 ? chapter : chapter + " · " + when, 10.5f, Ui.LIGHT);
+                sub.setPadding(0, dp(3), 0, 0);
+                texts.addView(sub);
+                row.addView(texts, new LinearLayout.LayoutParams(0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+                TextView del = Ui.text(this, "×", 20, Ui.LIGHT);
+                del.setPadding(dp(12), dp(4), dp(4), dp(4));
+                del.setOnClickListener(new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        marks.remove(it);
+                        saveMarks();
+                        bindNotes();
+                    }
+                });
+                row.addView(del);
+                row.setOnClickListener(new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        notesPanel.setVisibility(View.GONE);
+                        gotoBookmark(it);
+                    }
+                });
+                LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                rlp.setMargins(dp(16), 0, dp(16), dp(6));
+                notesContent.addView(row, rlp);
+            }
+        }
+
+        // 书友想法
+        notesContent.addView(noteSection("书友想法"));
+        LinearLayout reviewCard = new LinearLayout(this);
+        reviewCard.setOrientation(LinearLayout.VERTICAL);
+        reviewCard.setBackgroundDrawable(Ui.box(Color.WHITE, Ui.LINE, 1, dp(8)));
+        reviewCard.setPadding(dp(16), dp(14), dp(16), dp(14));
+        TextView rt = Ui.text(this, "看其他读者写的想法和划线", 14, Ui.INK);
+        reviewCard.addView(rt);
+        TextView rs = Ui.text(this, "来自云端，只读。需先完成 E-Ink 客户端授权。", 11f, Ui.LIGHT);
+        rs.setPadding(0, dp(4), 0, 0);
+        reviewCard.addView(rs);
+        reviewCard.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                openReviews();
+            }
+        });
+        LinearLayout.LayoutParams rcp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        rcp.setMargins(dp(16), 0, dp(16), dp(16));
+        notesContent.addView(reviewCard, rcp);
+
+        TextView note = Ui.text(this, "自己写想法 / 划线需要微信读书私有写入接口，暂不支持。",
+                10.5f, Ui.LIGHT);
+        note.setPadding(dp(18), 0, dp(18), dp(12));
+        notesContent.addView(note);
+    }
+
+    /** 笔记页：我的书签 + 书友想法。做成覆盖层，和官方「笔记」页一致。 */
+    private void openNotes() {
+        hideToolbar();
+        loadMarks();
+        if (notesPanel == null) {
+            notesPanel = buildNotesPanel();
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
+            rootView.addView(notesPanel, lp);
+        }
+        bindNotes();
+        notesPanel.setVisibility(View.VISIBLE);
+        notesPanel.bringToFront();
+    }
+
     private void openDetail() {
         hideToolbar();
         if (LocalBooks.isLocal(bookId) || demo) {
@@ -468,6 +768,27 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setBackgroundColor(Color.WHITE);
         panel.setVisibility(View.GONE);
+
+        // 图5：标题栏 + 右上「首行缩进 ›」入口
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setPadding(dp(18), dp(12), dp(12), dp(8));
+        TextView h = Ui.text(this, "字体设置", 15, Ui.INK);
+        head.addView(h, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        TextView indentEntry = Ui.text(this, "首行缩进 ›", 12.5f, Ui.SUB);
+        indentEntry.setPadding(dp(10), dp(5), dp(10), dp(5));
+        indentEntry.setBackgroundDrawable(Ui.box(Ui.TILE, Ui.LINE, 1, dp(14)));
+        indentEntry.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showParaPanel(true);
+            }
+        });
+        head.addView(indentEntry);
+        panel.addView(head, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         View line = new View(this);
         line.setBackgroundColor(Ui.LINE);
@@ -574,20 +895,32 @@ public class ReaderActivity extends Activity implements PageView.Callback {
      * 左侧「名称 + 当前值」，右侧滑杆。
      * 数值放在名称下面而不是跟着手柄跑：小屏上跟随的两位数又细又糊，还一直跳。
      */
-    private View styleRow(String label, SeekRow row, String value) {
+    private View styleRow(String label, final SeekRow row, String value) {
         LinearLayout wrap = new LinearLayout(this);
         wrap.setOrientation(LinearLayout.HORIZONTAL);
         wrap.setGravity(Gravity.CENTER_VERTICAL);
-        wrap.setPadding(dp(16), dp(4), dp(10), dp(4));
+        wrap.setPadding(dp(14), dp(5), dp(14), dp(5));
+
+        // 图5：轨道两端的圆形 − / + 按钮
+        TextView minus = stepButton("−");
+        minus.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                row.nudge(-1);
+            }
+        });
+        wrap.addView(minus, new LinearLayout.LayoutParams(dp(34), dp(34)));
 
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
         col.setGravity(Gravity.CENTER_VERTICAL);
         TextView title = Ui.text(this, label, 10.5f, Ui.SUB);
+        title.setGravity(Gravity.CENTER);
         col.addView(title, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        TextView num = Ui.text(this, value, 15, Ui.INK);
+        TextView num = Ui.text(this, value, 14, Ui.INK);
         num.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        num.setGravity(Gravity.CENTER);
         col.addView(num, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         if ("字号".equals(label)) fontValue = num;
@@ -595,8 +928,139 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         else if ("缩进".equals(label)) indentValue = num;
         else lineValue = num;
         wrap.addView(col, new LinearLayout.LayoutParams(dp(44), dp(40)));
+
         wrap.addView(row, new LinearLayout.LayoutParams(0, dp(48), 1f));
+
+        TextView plus = stepButton("+");
+        plus.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                row.nudge(1);
+            }
+        });
+        wrap.addView(plus, new LinearLayout.LayoutParams(dp(34), dp(34)));
         return wrap;
+    }
+
+    private TextView stepButton(String glyph) {
+        TextView t = Ui.text(this, glyph, 17, Ui.INK);
+        t.setGravity(Gravity.CENTER);
+        t.setBackgroundDrawable(Ui.oval(Ui.TILE));
+        return t;
+    }
+
+    /** 图6：段落样式——首行顶格 / 首行缩进 卡片 + 段间距开关。 */
+    private View buildParaPanel() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setBackgroundColor(Color.WHITE);
+        panel.setVisibility(View.GONE);
+
+        TextView head = Ui.text(this, "段落样式", 15, Ui.INK);
+        head.setPadding(dp(18), dp(14), dp(18), dp(10));
+        panel.addView(head);
+
+        LinearLayout cards = new LinearLayout(this);
+        cards.setOrientation(LinearLayout.HORIZONTAL);
+        cards.setPadding(dp(16), dp(2), dp(16), dp(10));
+        paraCardFlush = styleCard("首行顶格");
+        paraCardIndent = styleCard("首行缩进");
+        paraCardFlush.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                setIndentMode(false);
+            }
+        });
+        paraCardIndent.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                setIndentMode(true);
+            }
+        });
+        cards.addView(paraCardFlush, new LinearLayout.LayoutParams(0, dp(74), 1f));
+        LinearLayout.LayoutParams im = new LinearLayout.LayoutParams(0, dp(74), 1f);
+        im.setMargins(dp(10), 0, 0, 0);
+        cards.addView(paraCardIndent, im);
+        panel.addView(cards, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // 段间距开关
+        LinearLayout gapRow = new LinearLayout(this);
+        gapRow.setOrientation(LinearLayout.HORIZONTAL);
+        gapRow.setGravity(Gravity.CENTER_VERTICAL);
+        gapRow.setPadding(dp(18), dp(8), dp(18), dp(12));
+        TextView gl = Ui.text(this, "段间距", 14, Ui.INK);
+        gapRow.addView(gl, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        final Toggle gapToggle = new Toggle(this);
+        gapToggle.setChecked(store.paraGap());
+        gapToggle.setOnChange(new Toggle.OnChange() {
+            @Override
+            public void onChange(boolean checked) {
+                store.setParaGap(checked);
+                pageView.setParaGap(checked);
+                savePos();
+            }
+        });
+        gapRow.addView(gapToggle);
+        panel.addView(gapRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TextView done = flatButton("完成", 13.5f, Ui.INK);
+        done.setBackgroundDrawable(Ui.box(Ui.TILE, Ui.LINE, 1, dp(20)));
+        LinearLayout.LayoutParams dp2 = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(40));
+        dp2.setMargins(dp(20), dp(2), dp(20), dp(12));
+        done.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showParaPanel(false);
+            }
+        });
+        panel.addView(done, dp2);
+        return panel;
+    }
+
+    private TextView styleCard(String label) {
+        TextView t = Ui.text(this, label, 14, Ui.INK);
+        t.setGravity(Gravity.CENTER);
+        t.setBackgroundDrawable(Ui.box(Ui.TILE, Ui.LINE, 1, dp(8)));
+        return t;
+    }
+
+    /** 记住上次的缩进格数，切「顶格」时暂存，切回「缩进」时恢复。 */
+    private int lastIndentCells = 4;
+
+    private void setIndentMode(boolean indent) {
+        int cells = indent ? (lastIndentCells > 0 ? lastIndentCells : 4) : 0;
+        if (indent) lastIndentCells = pageView.indentCells() > 0 ? pageView.indentCells() : lastIndentCells;
+        pageView.setIndentCells(cells);
+        store.setIndentCells(cells);
+        refreshParaCards();
+        savePos();
+    }
+
+    private void refreshParaCards() {
+        if (paraCardFlush == null) return;
+        boolean indent = pageView.indentCells() > 0;
+        paintCard(paraCardFlush, !indent);
+        paintCard(paraCardIndent, indent);
+    }
+
+    private void paintCard(TextView card, boolean selected) {
+        card.setTextColor(selected ? Color.WHITE : Ui.INK);
+        card.setBackgroundDrawable(Ui.box(selected ? Ui.INK : Ui.TILE,
+                selected ? Ui.INK : Ui.LINE, 1, dp(8)));
+    }
+
+    private void showParaPanel(boolean show) {
+        if (paraPanel == null) return;
+        if (show) {
+            refreshParaCards();
+            displayPanel.setVisibility(View.GONE);
+        }
+        paraPanel.setVisibility(show ? View.VISIBLE : View.GONE);
+        syncChrome();
     }
 
     // ---------------- 拖动预览：重排要按节奏，不能逐像素来 ----------------
@@ -668,13 +1132,39 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         panel.setBackgroundColor(Color.WHITE);
         panel.setVisibility(View.GONE);
 
+        // 图2：顶部书名标题栏 + 「去底部」，大字号
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setPadding(dp(16), dp(16), dp(16), dp(4));
+        TextView bookLabel = Ui.text(this, bookTitle, 18, Ui.INK);
+        bookLabel.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        bookLabel.setMaxLines(1);
+        bookLabel.setEllipsize(TextUtils.TruncateAt.END);
+        tocTitleView = bookLabel;
+        head.addView(bookLabel, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        TextView toBottom = Ui.text(this, "↓ 去底部", 12, Ui.SUB);
+        toBottom.setPadding(dp(6), dp(4), dp(4), dp(4));
+        toBottom.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (tocList != null && tocAdapter != null && tocAdapter.getCount() > 0) {
+                    tocList.setSelection(tocAdapter.getCount() - 1);
+                }
+            }
+        });
+        head.addView(toBottom);
+        panel.addView(head, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
         EditText search = new EditText(this);
         search.setSingleLine(true);
-        search.setHint("搜索");
+        search.setHint("搜索全书内容");
         search.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         search.setTextColor(Ui.INK);
         search.setHintTextColor(Ui.LIGHT);
-        search.setBackgroundDrawable(Ui.box(Color.WHITE, Ui.LINE, 1, 3));
+        search.setBackgroundDrawable(Ui.box(Color.WHITE, Ui.LINE, 1, dp(20)));
         search.setPadding(dp(12), dp(8), dp(12), dp(8));
         search.addTextChangedListener(new TextWatcher() {
             @Override
@@ -771,40 +1261,43 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         LinearLayout bottom = new LinearLayout(this);
         bottom.setOrientation(LinearLayout.HORIZONTAL);
         bottom.setGravity(Gravity.CENTER_VERTICAL);
-        bottom.setPadding(dp(16), 0, dp(16), 0);
+        bottom.setPadding(dp(10), 0, dp(10), 0);
 
-        tocTab = Ui.text(this, "目录", 13.5f, Ui.INK);
-        tocTab.setGravity(Gravity.CENTER);
-        tocTab.setPadding(dp(6), dp(10), dp(6), dp(10));
-        tocTab.setOnClickListener(new View.OnClickListener() {
+        // 图2：左右翻页箭头 + 中间「书签」胶囊按钮
+        TextView prev = Ui.text(this, "⌃", 20, Ui.SUB);
+        prev.setGravity(Gravity.CENTER);
+        prev.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                setBookmarkMode(false);
+                onPrevChapter();
             }
         });
-        bottom.addView(tocTab, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        bookmarkTab = Ui.text(this, "书签", 13.5f, Ui.LIGHT);
+        bottom.addView(prev, new LinearLayout.LayoutParams(dp(48), dp(44)));
+
+        bookmarkTab = Ui.text(this, "书签", 14, Ui.INK);
         bookmarkTab.setGravity(Gravity.CENTER);
-        bookmarkTab.setPadding(dp(6), dp(10), dp(6), dp(10));
+        bookmarkTab.setPadding(dp(20), dp(9), dp(20), dp(9));
+        bookmarkTab.setBackgroundDrawable(Ui.box(Color.WHITE, Ui.LINE, 1, dp(20)));
         bookmarkTab.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                setBookmarkMode(true);
+                setBookmarkMode(!bookmarkMode);
             }
         });
         bottom.addView(bookmarkTab, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        TextView close = flatButton("关闭", 13, Ui.SUB);
-        close.setOnClickListener(new View.OnClickListener() {
+                dp(38), 1f));
+
+        TextView next = Ui.text(this, "⌄", 20, Ui.SUB);
+        next.setGravity(Gravity.CENTER);
+        next.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                showToc(false);
+                onNextChapter();
             }
         });
-        bottom.addView(close);
+        bottom.addView(next, new LinearLayout.LayoutParams(dp(48), dp(44)));
         panel.addView(bottom, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(52)));
 
         return panel;
     }
@@ -974,12 +1467,18 @@ public class ReaderActivity extends Activity implements PageView.Callback {
             }
             final int index = row.chapterIndex;
             title.setText(String.valueOf(chapters.get(index).get("title")));
-            if (index == chapterIndex) {
-                title.setTextColor(Ui.INK);
+            boolean isCurrent = index == chapterIndex;
+            if (isCurrent) {
+                // 图2：当前章整行黑底白字高亮，页码也是白色
+                v.setBackgroundColor(Ui.INK);
+                title.setTextColor(Color.WHITE);
                 title.setTypeface(Typeface.DEFAULT_BOLD);
+                words.setTextColor(Color.WHITE);
             } else {
+                v.setBackgroundColor(Color.WHITE);
                 title.setTextColor(Ui.SUB);
                 title.setTypeface(Typeface.DEFAULT);
+                words.setTextColor(0xFFB0B0B0);
             }
             int level = chapters.get(index).get("level") instanceof Number
                     ? ((Number) chapters.get(index).get("level")).intValue() : 0;
@@ -1160,8 +1659,11 @@ public class ReaderActivity extends Activity implements PageView.Callback {
 
     private void setBookmarkMode(boolean bm) {
         bookmarkMode = bm;
-        if (tocTab != null) tocTab.setTextColor(bm ? Ui.LIGHT : Ui.INK);
-        if (bookmarkTab != null) bookmarkTab.setTextColor(bm ? Ui.INK : Ui.LIGHT);
+        if (bookmarkTab != null) {
+            bookmarkTab.setTextColor(bm ? Color.WHITE : Ui.INK);
+            bookmarkTab.setBackgroundDrawable(Ui.box(bm ? Ui.INK : Color.WHITE,
+                    bm ? Ui.INK : Ui.LINE, 1, dp(20)));
+        }
         if (tocSearch != null) tocSearch.setVisibility(bm ? View.GONE : View.VISIBLE);
         if (tocList != null) tocList.setVisibility(bm ? View.GONE : View.VISIBLE);
         if (markList != null) markList.setVisibility(bm ? View.VISIBLE : View.GONE);
@@ -1264,6 +1766,7 @@ public class ReaderActivity extends Activity implements PageView.Callback {
             hideToolbar();
         } else {
             toolbar.setVisibility(View.VISIBLE);
+            if (topToolbar != null) topToolbar.setVisibility(View.VISIBLE);
             syncChrome();
         }
     }
@@ -1273,8 +1776,16 @@ public class ReaderActivity extends Activity implements PageView.Callback {
      * 开着抽屉/面板先收掉，只剩底栏时就是「回书架」，都没开时才是展开菜单。
      */
     private void backOrMenu() {
+        if (notesPanel != null && notesPanel.getVisibility() == View.VISIBLE) {
+            notesPanel.setVisibility(View.GONE);
+            return;
+        }
         if (tocPanel.getVisibility() == View.VISIBLE) {
             showToc(false);
+            return;
+        }
+        if (paraPanel != null && paraPanel.getVisibility() == View.VISIBLE) {
+            showParaPanel(false);
             return;
         }
         if (displayPanel.getVisibility() == View.VISIBLE) {
@@ -1294,7 +1805,9 @@ public class ReaderActivity extends Activity implements PageView.Callback {
 
     private void hideToolbar() {
         toolbar.setVisibility(View.GONE);
+        if (topToolbar != null) topToolbar.setVisibility(View.GONE);
         displayPanel.setVisibility(View.GONE);
+        if (paraPanel != null) paraPanel.setVisibility(View.GONE);
         progressPanel.setVisibility(View.GONE);
         showToc(false);
         syncChrome();
@@ -1360,15 +1873,16 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         int total = pageView.totalPages();
         int len = currentText.length();
         int at = pageView.currentOffset();
+        int pct;
         if (wholeBook && p != null && p.size() > 0) {
-            progressPercent.setText(p.percent(chapterIndex, page, total) + "%");
-            progressPages.setText(p.pageNumber(chapterIndex, page, total) + " / "
-                    + p.totalPages(chapterIndex, total));
+            pct = p.percent(chapterIndex, page, total);
         } else {
-            progressPercent.setText((len == 0 ? 0 : at * 100 / Math.max(1, len)) + "%");
-            progressPages.setText((page + 1) + " / " + total);
+            pct = len == 0 ? 0 : at * 100 / Math.max(1, len);
         }
-        progressChapter.setText((chapterIndex + 1) + " / " + chapters.size());
+        progressPercent.setText(pct + "%");
+        String spent = Ui.duration(store.readTime(bookId));
+        progressPages.setText(spent.length() == 0 ? "0 分钟" : spent);
+        progressChapter.setText(String.valueOf(store.bookmarkCount()));
         progressRow.setValue(len == 0 ? 0 : at * 100 / Math.max(1, len));
     }
 
@@ -1381,7 +1895,9 @@ public class ReaderActivity extends Activity implements PageView.Callback {
     private boolean anyPanelOpen() {
         return tocPanel.getVisibility() == View.VISIBLE
                 || displayPanel.getVisibility() == View.VISIBLE
+                || (paraPanel != null && paraPanel.getVisibility() == View.VISIBLE)
                 || progressPanel.getVisibility() == View.VISIBLE
+                || (notesPanel != null && notesPanel.getVisibility() == View.VISIBLE)
                 || toolbar.getVisibility() == View.VISIBLE;
     }
 
@@ -1452,6 +1968,15 @@ public class ReaderActivity extends Activity implements PageView.Callback {
                             if (!readable(index)) index = nextReadable(index, 1);
                             if (index < 0) index = 0;
                             loadChapter(index, false, offset);
+                            // 开书拉取：开关打开时，等正文落地后再和云端对齐一次
+                            if (store.syncOnOpen()) {
+                                ui.postDelayed(new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        syncNow(Sync.TRIGGER_OPEN);
+                                    }
+                                }, 400);
+                            }
                         }
                     });
                 } catch (final Exception e) {
@@ -1472,7 +1997,7 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         chapterIndex = index;
         final Map<String, Object> chapter = chapters.get(index);
         chapterTitle = String.valueOf(chapter.get("title"));
-        header.setText(bookTitle + " · " + chapterTitle);
+        header.setText(chapterTitle);
         showOverlay("加载中…");
         if (LocalBooks.isLocal(bookId)) {
             final int token = ++loadToken;
@@ -1730,17 +2255,242 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         store.setLastPos(bookId, chapterIndex, pageView.currentOffset());
     }
 
-    // ---------------- 进度 ----------------
+    // ---------------- 进度双向同步 ----------------
+
+    /**
+     * 拉取云端进度并与本地对比，按 Sync 决策执行。trigger 决定开关与上传行为。
+     * 双源：书架同步存下的 bookProgress（web）+ E-Ink getProgress（gateway，需授权）。
+     */
+    private void syncNow(final int trigger) {
+        if (bookId == null || LocalBooks.isLocal(bookId) || demo || chapters.isEmpty()) return;
+        if (syncing) return;
+        syncing = true;
+        brief(trigger == Sync.TRIGGER_MANUAL ? "同步中…" : "正在对齐云端进度");
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                Sync.Catalog cat = new Sync.Catalog(chapters);
+                final Sync.Pos local = localPos(cat);
+                Sync.Pos web = posFromMark(cat, store.mark(bookId));
+                Sync.Pos gateway = posFromEink(cat);
+                Sync.RemoteChoice choice = Sync.chooseRemote(web, gateway);
+                final Sync.Pos remote = choice.pos == null ? null
+                        : Sync.normalizeRemote(cat, choice.pos);
+                final int cmp = Sync.compare(local, remote);
+                final boolean conflict = choice.conflict;
+                final String pulled = remote == null ? "" : String.valueOf(remote.percent);
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        syncing = false;
+                        if (pulled.length() > 0) {
+                            store.setSyncState(bookId, System.currentTimeMillis(), 0, "");
+                        }
+                        applyDecision(trigger, cmp, conflict, local, remote, cat);
+                    }
+                });
+            }
+        }).start();
+    }
+
+    /** 本地当前位置 → 统一坐标。用字数权重算全书百分比，和云端同一把尺子。 */
+    private Sync.Pos localPos(Sync.Catalog cat) {
+        if (chapterIndex < 0 || chapterIndex >= chapters.size()) {
+            return new Sync.Pos(0, "", 0, 0L, "local");
+        }
+        String uid = String.valueOf(chapters.get(chapterIndex).get("uid"));
+        int offset = pageView == null ? 0 : pageView.currentOffset();
+        int chLen = currentText.length();
+        if (chLen <= 0) {
+            Object wc = chapters.get(chapterIndex).get("wordCount");
+            chLen = wc instanceof Number ? ((Number) wc).intValue() : 0;
+        }
+        return new Sync.Pos(cat.localPercent(chapterIndex, offset, chLen), uid, offset, 0L, "local");
+    }
+
+    /** 书架同步存下的云端位置（Resume 编码串）→ 统一坐标。 */
+    private Sync.Pos posFromMark(Sync.Catalog cat, String raw) {
+        Resume.Mark m = Resume.parse(raw);
+        if (m == null) return null;
+        double pct = cat.remotePercent(m.uid, m.offset);
+        if (pct < 0) {
+            // uid 对不上：退回下标兜底，只用一个粗略百分比
+            int idx = Resume.clamp(m.idx, cat.words.length);
+            pct = cat.localPercent(idx, m.offset, 0);
+        }
+        return new Sync.Pos(pct, m.uid, m.offset, m.updated, "web");
+    }
+
+    /** E-Ink 精确进度 → 统一坐标。未授权或失败返回 null，自动降级为只有 web 单源。 */
+    private Sync.Pos posFromEink(Sync.Catalog cat) {
+        Eink.Cred cred = Eink.load(store);
+        if (!cred.ok()) return null;
+        try {
+            Eink.Progress ep = Eink.getProgress(store, cred, bookId, store.compat());
+            if (!ep.ok()) return null;
+            return new Sync.Pos(ep.percent, ep.chapterUid, ep.chapterOffset, ep.updated, "gateway");
+        } catch (Exception e) {
+            Trace.i("Eink getProgress failed: " + (e.getMessage() == null ? e : e.getMessage()));
+            return null;
+        }
+    }
+
+    /** 执行决策：跳转 / 保留 / 上传 / 弹窗。 */
+    private void applyDecision(int trigger, int cmp, boolean conflict,
+                               Sync.Pos local, Sync.Pos remote, Sync.Catalog cat) {
+        Sync.Action a = Sync.decide(cmp, conflict, trigger,
+                store.syncOnOpen(), store.syncOnClose());
+        Trace.i("sync trigger=" + trigger + " cmp=" + cmp + " conflict=" + conflict
+                + " -> " + a.what + " " + a.reason
+                + " local=" + (local == null ? "-" : local.percent)
+                + " remote=" + (remote == null ? "-" : remote.percent));
+        switch (a.what) {
+            case Sync.ACT_JUMP_REMOTE:
+                if (remote != null && jumpToRemote(remote, cat)) {
+                    brief("已跳到云端进度 " + (int) Math.round(remote.percent) + "%");
+                } else {
+                    brief("云端位置对不上本地目录，保留当前位置");
+                }
+                break;
+            case Sync.ACT_UPLOAD_LOCAL:
+                uploadLocal();
+                brief("本地进度已上传云端");
+                break;
+            case Sync.ACT_ASK:
+                showConflictDialog(local, remote, cat);
+                break;
+            case Sync.ACT_KEEP_LOCAL:
+                if (trigger == Sync.TRIGGER_MANUAL) brief("本地进度更新，保留本地");
+                break;
+            default:
+                if (trigger == Sync.TRIGGER_MANUAL) brief("两端进度一致");
+                break;
+        }
+    }
+
+    /** 跳到云端记录的位置：按 uid 找章，章内用字数偏移（≈字符偏移）定位。 */
+    private boolean jumpToRemote(Sync.Pos remote, Sync.Catalog cat) {
+        int idx = cat.indexOf(remote.chapterUid);
+        if (idx < 0 || idx >= chapters.size()) return false;
+        Object wc = chapters.get(idx).get("wordCount");
+        int words = wc instanceof Number ? ((Number) wc).intValue() : 0;
+        int offset = words > 0 ? Math.min(remote.chapterOffset, words) : remote.chapterOffset;
+        // 目录变了字数可能对不上，用章内比例兜底换算成字符位置
+        double frac = cat.remoteChapterFraction(remote.chapterUid, remote.chapterOffset);
+        if (frac >= 0 && words > 0) offset = (int) (frac * words);
+        loadChapter(idx, false, Math.max(0, offset));
+        return true;
+    }
+
+    /** 冲突弹窗：两侧百分比 + 归属，由用户裁决。 */
+    private void showConflictDialog(final Sync.Pos local, final Sync.Pos remote,
+                                    final Sync.Catalog cat) {
+        String lp = local == null ? "—" : (int) Math.round(local.percent) + "%";
+        String rp = remote == null ? "—" : (int) Math.round(remote.percent) + "%"
+                + (remote.source.length() > 0 ? "（" + srcLabel(remote.source) + "）" : "");
+        new AlertDialog.Builder(this)
+                .setTitle("两端进度不一致")
+                .setMessage("本地读到 " + lp + "\n云端读到 " + rp + "\n\n选择以哪一端为准？")
+                .setPositiveButton("用云端进度", new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface d, int which) {
+                        if (remote != null && jumpToRemote(remote, cat)) {
+                            brief("已跳到云端进度");
+                        } else {
+                            brief("云端位置对不上，保留本地");
+                        }
+                    }
+                })
+                .setNegativeButton("保留本地并上传", new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface d, int which) {
+                        uploadLocal();
+                        brief("本地进度已上传云端");
+                    }
+                })
+                .show();
+    }
+
+    private static String srcLabel(String source) {
+        if ("web".equals(source)) return "网页";
+        if ("gateway".equals(source)) return "客户端";
+        return source;
+    }
+
+    /** 上传本地进度：先落 pending 快照（断网不丢），复用已验证的 report 通道，成功再清。 */
+    private void uploadLocal() {
+        if (bookId == null || chapterIndex < 0 || chapterIndex >= chapters.size()) return;
+        String uid = String.valueOf(chapters.get(chapterIndex).get("uid"));
+        int offset = pageView == null ? 0 : pageView.currentOffset();
+        int percent = overallProgress(offset);
+        String summary = currentText.length() == 0 ? ""
+                : currentText.substring(offset, Math.min(currentText.length(), offset + 20));
+        // pending 快照格式：uid|offset|idx|percent|summary
+        String snap = uid + "|" + offset + "|" + chapterIndex + "|" + percent + "|" + summary;
+        store.setPendingPos(bookId, snap);
+        final String pending = snap;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                boolean ok = false;
+                // 遇「忙」最多重发 10 次、每次间隔 2 秒（对齐 koplugin 的弱网策略）
+                for (int attempt = 0; attempt < Sync.PUSH_RETRY_MAX && !ok; attempt++) {
+                    if (attempt > 0) {
+                        try {
+                            Thread.sleep(Sync.PUSH_RETRY_MS);
+                        } catch (InterruptedException ie) {
+                            break;
+                        }
+                    }
+                    ok = reportSilently(pending);
+                }
+                final boolean done = ok;
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (done) {
+                            store.clearPendingPos(bookId);
+                            store.setSyncState(bookId, 0, System.currentTimeMillis(), "");
+                        } else {
+                            // 没上传成功也要把失败原因记下，pending 快照保留待下次
+                            store.setSyncState(bookId, 0, 0, "上传失败，位置已暂存");
+                        }
+                    }
+                });
+            }
+        }).start();
+    }
+
+    /** 从 pending 快照上报一次，不碰 UI、不弹提示。true 表示落库成功。 */
+    private boolean reportSilently(String snap) {
+        if (ctx == null || demo) return false;
+        String[] p = snap.split("\\|", -1);
+        if (p.length < 4) return false;
+        String uid = p[0];
+        int offset = Store.parseInt(p[1]);
+        int idx = Store.parseInt(p[2]);
+        int percent = Store.parseInt(p[3]);
+        String summary = p.length > 4 ? p[4] : "";
+        int elapsed = 0;
+        try {
+            return api.report(bookId, uid, idx, offset, percent, elapsed, summary, ctx);
+        } catch (Exception e) {
+            Trace.i("reportSilently failed: " + e);
+            return false;
+        }
+    }
 
     private void report() {
+        final long now = System.currentTimeMillis();
+        final int elapsed = (int) Math.max(0L, (now - sinceReport) / 1000L);
+        sinceReport = now;
+        // 本 App 阅读时长与是否联网/是否本地书无关，只要真的在读就记（统计卡片口径）。
+        if (!demo && elapsed > 0) store.noteRead(elapsed);
         if (LocalBooks.isLocal(bookId)) return;   // 本地书没有云端进度
         if (demo || chapters.isEmpty() || ctx == null || currentText.length() == 0) return;
         final String uid = String.valueOf(chapters.get(chapterIndex).get("uid"));
         final int offset = pageView.currentOffset();
         final int progress = overallProgress(offset);
-        final long now = System.currentTimeMillis();
-        final int elapsed = (int) Math.max(0L, (now - sinceReport) / 1000L);
-        sinceReport = now;
         final String summary = currentText.substring(offset,
                 Math.min(currentText.length(), offset + 20));
         final Api.Context c = ctx;
@@ -1780,11 +2530,25 @@ public class ReaderActivity extends Activity implements PageView.Callback {
     protected void onPause() {
         ui.removeCallbacks(ticker);
         ui.removeCallbacks(applyPreview);
+        ui.removeCallbacks(autoFlipTick);
+        autoFlipping = false;
+        if (autoFlipBtn != null) autoFlipBtn.setText("开启自动翻页");
         report();
         if (!chapters.isEmpty()) {
             store.setLastPos(bookId, chapterIndex, pageView.currentOffset());
         }
+        // 关书上传：带 pending 快照 + 弱网重试，确保本地进度不丢。
+        // report() 仍保留，负责阅读时长这条基础链路。
+        if (store.syncOnClose() && bookId != null && !LocalBooks.isLocal(bookId)
+                && !demo && !chapters.isEmpty()) {
+            uploadLocal();
+        }
         super.onPause();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
     }
 
     private int dp(int v) {

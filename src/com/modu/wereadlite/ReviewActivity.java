@@ -16,6 +16,7 @@ import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -210,36 +211,31 @@ public class ReviewActivity extends Activity {
 
     // ---------------- 卡片 ----------------
 
-    /** 顶部那张：本页对应的原文片段。 */
+    /** 顶部那张：本页对应的原文片段。全宽展示，长按复制。 */
     private View markCard(String text) {
         LinearLayout card = card();
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-
         TextView body = Ui.text(this, text, 13.5f, Ui.INK);
         body.setTypeface(Typeface.DEFAULT_BOLD);
         body.setMaxLines(4);
         body.setEllipsize(TextUtils.TruncateAt.END);
         body.setLineSpacing(dp(5), 1f);
-        row.addView(body, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        card.addView(body);
 
-        LinearLayout side = new LinearLayout(this);
-        side.setOrientation(LinearLayout.VERTICAL);
-        side.setGravity(Gravity.CENTER);
-        side.setBackgroundDrawable(Ui.box(Color.WHITE, Ui.LINE, 1, 0));
-        NavIcon down = new NavIcon(this, NavIcon.DOWN);
-        down.setInk(Ui.SUB);
-        side.addView(down, new LinearLayout.LayoutParams(dp(18), dp(18)));
-        TextView label = Ui.text(this, "划线", 11, Ui.SUB);
-        label.setPadding(0, dp(3), 0, 0);
-        side.addView(label);
-        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(dp(58),
-                ViewGroup.LayoutParams.MATCH_PARENT);
-        slp.leftMargin = dp(10);
-        row.addView(side, slp);
+        TextView tag = Ui.text(this, "本章原文 · 长按复制", 10.5f, Ui.LIGHT);
+        tag.setPadding(0, dp(8), 0, 0);
+        card.addView(tag);
 
-        card.addView(row);
+        body.setOnLongClickListener(new View.OnLongClickListener() {
+            @Override
+            public boolean onLongClick(View v) {
+                TextView tv = (TextView) v;
+                android.content.ClipboardManager cm =
+                        (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                cm.setText(tv.getText());
+                Toast.makeText(ReviewActivity.this, "已复制", Toast.LENGTH_SHORT).show();
+                return true;
+            }
+        });
         return card;
     }
 

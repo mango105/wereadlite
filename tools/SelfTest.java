@@ -34,6 +34,9 @@ public class SelfTest {
         testEpub();
         testBookmarks();
         testBackup();
+        testSync();
+        testEinkProgress();
+        testReadingStats();
         System.out.println("---- " + passed + " passed, " + failed + " failed");
         if (failed > 0) System.exit(1);
     }
@@ -751,6 +754,136 @@ public class SelfTest {
         deleteTree(root);
     }
 
+    // ---------- 进度双向同步决策 ----------
+
+    static void testSync() {
+        // 目录：3 章，字数 1000 / 2000 / 1000，累计 0 / 1000 / 3000 / 4000
+        List<Map<String, Object>> toc = new java.util.ArrayList<Map<String, Object>>();
+        toc.add(syncChapter("10", 1000));
+        toc.add(syncChapter("20", 2000));
+        toc.add(syncChapter("30", 1000));
+        Sync.Catalog cat = new Sync.Catalog(toc);
+        eq("坐标表总字数", cat.total, 4000L);
+        eq("坐标表按 uid 定位", cat.indexOf("20"), 1);
+        eq("坐标表 uid 对不上", cat.indexOf("99"), -1);
+        // 本地：第 1 章(index 1)读了一半，本章实际 2000 字 → (1000 + 1000)/4000 = 50%
+        eq("本地坐标转百分比", round(cat.localPercent(1, 1000, 2000)), 50.0);
+        // 云端：uid 20 章内偏移 1000 → (1000+1000)/4000 = 50%
+        eq("云端坐标转百分比", round(cat.remotePercent("20", 1000)), 50.0);
+        eq("云端 uid 对不上返回 -1", cat.remotePercent("99", 100), -1.0);
+        eq("云端章内比例", round(cat.remoteChapterFraction("20", 1000)), 0.5);
+        eq("云端偏移超出章字数被夹住", round(cat.remotePercent("20", 99999)), 75.0);
+
+        // 空目录不抛，退化成 fall back 也不脏
+        Sync.Catalog empty = new Sync.Catalog(new java.util.ArrayList<Map<String, Object>>());
+        eq("空目录总字数 0", empty.total, 0L);
+        eq("空目录百分比 0", empty.localPercent(0, 100, 1000), 0.0);
+
+        // normalize：能用目录算就用算出来的，算不出退回原始 progress
+        Sync.Pos raw = new Sync.Pos(63, "20", 1000, 100L, "web");
+        eq("归一化按目录重算", round(Sync.normalizeRemote(cat, raw).percent), 50.0);
+        Sync.Pos rawBad = new Sync.Pos(63, "99", 100, 100L, "web");
+        eq("归一化 uid 对不上退回原值", Sync.normalizeRemote(cat, rawBad).percent, 63.0);
+
+        // 时间戳规范化：毫秒折成秒
+        eq("毫秒时间戳折成秒", Sync.normalizeTimestamp(1765000000000L), 1765000000L);
+        eq("秒时间戳不变", Sync.normalizeTimestamp(1765000000L), 1765000000L);
+
+        // chooseRemote：取更新时间新的；坐标分歧记为 disagreement（静默，不弹窗）
+        Sync.Pos web = new Sync.Pos(50, "20", 1000, 100L, "web");
+        Sync.Pos gwNew = new Sync.Pos(50, "20", 1005, 200L, "gateway");
+        Sync.RemoteChoice c1 = Sync.chooseRemote(web, gwNew);
+        eq("双源取更新的一方", c1.pos.source, "gateway");
+        yes("双源偏移差 5 字不分歧", !c1.conflict);
+        Sync.Pos gwFar = new Sync.Pos(70, "20", 1900, 200L, "gateway");
+        yes("双源同章偏移差 900 标记分歧", Sync.chooseRemote(web, gwFar).conflict);
+        Sync.Pos gwCross = new Sync.Pos(51, "30", 0, 200L, "gateway");
+        yes("双源跨章标记分歧", Sync.chooseRemote(web, gwCross).conflict);
+        eq("时间相同优先网页", Sync.chooseRemote(web, new Sync.Pos(50, "20", 1000, 100L, "gateway")).pos.source, "web");
+        eq("只有网页源就用网页", Sync.chooseRemote(web, null).pos.source, "web");
+        eq("只有网关源就用网关", Sync.chooseRemote(null, gwNew).pos.source, "gateway");
+
+        // compare：坐标优先——同章偏移差在容差内算同位置，不管百分比差多少
+        Sync.Pos local = new Sync.Pos(50, "20", 1000, 0L, "local");
+        eq("同章偏移差 5 判同位置", Sync.compare(local, new Sync.Pos(55, "20", 1005, 0L, "web")), Sync.SAME);
+        eq("同章偏移领先判云端领先", Sync.compare(local, new Sync.Pos(51, "20", 1200, 0L, "web")), Sync.REMOTE_AHEAD);
+        eq("同章偏移落后判本地领先", Sync.compare(local, new Sync.Pos(49, "20", 800, 0L, "web")), Sync.LOCAL_AHEAD);
+        eq("跨章差在阈值内判可疑",
+                Sync.compare(local, new Sync.Pos(50.5, "30", 0, 0L, "web")), Sync.DIFFERENT_CHAPTER);
+        eq("本地或云端为空按同位置", Sync.compare(null, local), Sync.SAME);
+        // 只有一端有坐标时退回百分比
+        Sync.Pos noCoord = new Sync.Pos(50, "", 0, 0L, "web");
+        eq("无坐标按百分比同位置", Sync.compare(local, new Sync.Pos(51, "", 0, 0L, "web")), Sync.SAME);
+
+        // decide：开关 > compare 结果；双源分歧不弹窗（已静默取新）
+        eq("开书拉取关着就不动",
+                Sync.decide(Sync.REMOTE_AHEAD, false, Sync.TRIGGER_OPEN, false, true).what, Sync.ACT_NONE);
+        eq("关书上传关着就不动",
+                Sync.decide(Sync.LOCAL_AHEAD, false, Sync.TRIGGER_CLOSE, true, false).what, Sync.ACT_NONE);
+        eq("双源分歧不弹窗按同位置处理",
+                Sync.decide(Sync.SAME, true, Sync.TRIGGER_OPEN, true, true).what, Sync.ACT_NONE);
+        eq("两端一致不动",
+                Sync.decide(Sync.SAME, false, Sync.TRIGGER_OPEN, true, true).what, Sync.ACT_NONE);
+        eq("云端领先自动跳过去",
+                Sync.decide(Sync.REMOTE_AHEAD, false, Sync.TRIGGER_OPEN, true, true).what, Sync.ACT_JUMP_REMOTE);
+        eq("开书本地领先先保留",
+                Sync.decide(Sync.LOCAL_AHEAD, false, Sync.TRIGGER_OPEN, true, true).what, Sync.ACT_KEEP_LOCAL);
+        eq("关书本地领先回传云端",
+                Sync.decide(Sync.LOCAL_AHEAD, false, Sync.TRIGGER_CLOSE, true, true).what, Sync.ACT_UPLOAD_LOCAL);
+        eq("手动本地领先回传云端",
+                Sync.decide(Sync.LOCAL_AHEAD, false, Sync.TRIGGER_MANUAL, true, true).what, Sync.ACT_UPLOAD_LOCAL);
+        eq("手动跨章差异弹窗",
+                Sync.decide(Sync.DIFFERENT_CHAPTER, false, Sync.TRIGGER_MANUAL, true, true).what, Sync.ACT_ASK);
+        eq("手动同步不受开书开关限制",
+                Sync.decide(Sync.REMOTE_AHEAD, false, Sync.TRIGGER_MANUAL, false, false).what, Sync.ACT_JUMP_REMOTE);
+    }
+
+    // ---------- E-Ink 精确进度解析 ----------
+
+    static void testEinkProgress() {
+        Eink.Progress p = Eink.parseProgress(
+                "{\"bookId\":\"123\",\"chapterUid\":567,\"chapterOffset\":1234,"
+                        + "\"progress\":42,\"updateTime\":1765000000,"
+                        + "\"recordReadingTime\":7200,\"finishTime\":0}");
+        eq("进度 uid 数字转字符串", p.chapterUid, "567");
+        eq("进度章内偏移", p.chapterOffset, 1234);
+        eq("进度百分比", p.percent, 42);
+        eq("进度更新时间", p.updated, 1765000000L);
+        eq("进度累计时长", p.readSeconds, 7200);
+        yes("未读完", !p.finished);
+        yes("有数据算有效", p.ok());
+
+        // 毫秒时间戳在解析时折成秒
+        Eink.Progress millis = Eink.parseProgress(
+                "{\"chapterUid\":5,\"chapterOffset\":10,\"progress\":20,\"updateTime\":1765000000000}");
+        eq("毫秒时间戳解析折秒", millis.updated, 1765000000L);
+
+        // book 套一层
+        Eink.Progress nested = Eink.parseProgress(
+                "{\"book\":{\"chapterUid\":\"88\",\"chapterOffset\":50,\"progress\":7,"
+                        + "\"updateTime\":100,\"finishTime\":123}}");
+        eq("嵌套结构 uid", nested.chapterUid, "88");
+        eq("嵌套结构百分比", nested.percent, 7);
+        eq("嵌套结构更新时间", nested.updated, 100L);
+        yes("读完标记", nested.finished);
+
+        // 坏数据不抛
+        eq("空体不抛", Eink.parseProgress("").ok(), false);
+        eq("坏 JSON 不抛", Eink.parseProgress("not json").ok(), false);
+        eq("缺字段默认有否", Eink.parseProgress("{}").ok(), false);
+    }
+
+    static Map<String, Object> syncChapter(String uid, int words) {
+        Map<String, Object> row = new java.util.LinkedHashMap<String, Object>();
+        row.put("uid", uid);
+        row.put("wordCount", Integer.valueOf(words));
+        return row;
+    }
+
+    static double round(double v) {
+        return Math.round(v * 100.0) / 100.0;
+    }
+
     static byte[] readAllBytes(File f) {
         try {
             java.io.ByteArrayOutputStream b = new java.io.ByteArrayOutputStream();
@@ -760,6 +893,61 @@ public class SelfTest {
             in.close();
             return b.toByteArray();
         } catch (Exception e) { throw new RuntimeException(e); }
+    }
+
+    // ---------- 阅读统计（我 / 页卡片） ----------
+
+    static void testReadingStats() {
+        FakePrefs p = new FakePrefs();
+        Store s = new Store(p);
+
+        // 累计 = 所有 rt_ 之和；负数/非 int 忽略
+        eq("空书架累计为 0", s.totalReadTime(), 0L);
+        p.put("rt_b1", 3600);
+        p.put("rt_b2", 1800);
+        p.put("rt_b3", -5);
+        eq("累计时长求和", s.totalReadTime(), 5400L);
+
+        // noteRead 同时累进本 App 累计 + 当天
+        s.noteRead(600);
+        s.noteRead(300);
+        eq("本 App 累计", s.einkReadTime(), 900);
+        s.noteRead(0);
+        s.noteRead(-10);
+        eq("无效应忽略", s.einkReadTime(), 900);
+
+        // 本周：直接塞最近 8 天，只有 7 天内计入
+        java.util.Calendar c = java.util.Calendar.getInstance(java.util.Locale.CHINA);
+        java.text.SimpleDateFormat f = new java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.CHINA);
+        for (int i = 0; i < 7; i++) {
+            p.put("rd_" + f.format(c.getTime()), (i + 1) * 60);
+            c.add(java.util.Calendar.DAY_OF_MONTH, -1);
+        }
+        c.add(java.util.Calendar.DAY_OF_MONTH, -1);   // 第 8 天
+        String oldDay = "rd_" + f.format(c.getTime());
+        p.put(oldDay, 9999);
+        eq("本周 7 天求和", s.weekReadTime(), 60 + 120 + 180 + 240 + 300 + 360 + 420);
+        yes("8 天前不计入本周", s.weekReadTime() < 9999);
+
+        // 备份白名单
+        yes("backup want rd_", Backup.wantedPref("rd_20261117"));
+        yes("backup want einkRead", Backup.wantedPref("einkRead"));
+
+        // 导入合并：int 按较大值，且不能写成 string
+        FakePrefs p2 = new FakePrefs();
+        Store s2 = new Store(p2);
+        java.util.Map<String, String> inc = new java.util.LinkedHashMap<String, String>();
+        inc.put("einkRead", "1234");
+        inc.put("rd_20261117", "500");
+        inc.put("rt_b1", "200");   // 目标端没有，应写成 int 200
+        s2.mergeImportedPrefs(inc);
+        eq("导入 einkRead 类型正确", s2.einkReadTime(), 1234);
+        eq("导入 rd_ 类型正确", p2.getInt("rd_20261117", 0), 500);
+        eq("导入 rt_ 类型正确", p2.getInt("rt_b1", -1), 200);
+        // 再次导入更小值不覆盖
+        inc.put("einkRead", "100");
+        s2.mergeImportedPrefs(inc);
+        eq("累计时长不倒退", s2.einkReadTime(), 1234);
     }
 
     static void deleteTree(File f) {

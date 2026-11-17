@@ -243,6 +243,91 @@ public final class Eink {
         return Api.reviewRows(body);
     }
 
+    // ---------------- 阅读进度 ----------------
+
+    /** E-Ink 侧的单书精确进度（GET /book/getProgress）。 */
+    public static final class Progress {
+        public String chapterUid = "";
+        public int chapterOffset;
+        public int percent;          // 0~100
+        public long updated;         // 云端更新时间（秒）
+        public int readSeconds;      // recordReadingTime
+        public boolean finished;
+
+        public boolean ok() {
+            return chapterUid.length() > 0 || percent > 0 || updated > 0;
+        }
+    }
+
+    /**
+     * 拉取一本书在云端的精确进度。只带 bookId、走 vid/accessToken，
+     * 和 /shelf/sync 同一套鉴权，accessToken 过期自动续期重试一次。
+     */
+    public static Progress getProgress(Store store, Cred cred, String bookId, boolean compat)
+            throws IOException {
+        if (bookId == null || bookId.length() == 0) throw new IOException("缺少 bookId");
+        String url = BASE + "/book/getProgress?bookId=" + Protocol.encode(bookId);
+        Cred c = cred;
+        String body;
+        try {
+            body = call(url, "GET", null, c, compat);
+        } catch (IOException first) {
+            if (!isAuthError(first)) throw first;
+            c = refresh(c, compat);
+            save(store, c);
+            body = call(url, "GET", null, c, compat);
+        }
+        int err = Json.num(Json.parse(body), "errcode");
+        if (err != 0) throw new IOException("进度拉取失败 errcode=" + err);
+        return parseProgress(body);
+    }
+
+    /**
+     * 解析 getProgress 返回体，兼容顶层与 book 套一层两种结构。纯函数，SelfTest 直接跑。
+     */
+    static Progress parseProgress(String body) {
+        Progress p = new Progress();
+        if (body == null || body.length() == 0) return p;
+        Object root;
+        try {
+            root = Json.parse(body);
+        } catch (Exception e) {
+            return p;
+        }
+        Object book = Json.map(root, "book");
+        Object src = ((java.util.Map<?, ?>) book).isEmpty() ? root : book;
+        // uid 也接受数字：str 会把 Number 转成字符串
+        p.chapterUid = strOf(src, "chapterUid", "chapterId", "chapter_uid");
+        if (p.chapterUid.length() == 0) p.chapterUid = strOf(root, "chapterUid", "chapterId");
+        p.chapterOffset = numOf(src, "chapterOffset", "chapterPos", "offset");
+        p.percent = numOf(src, "progress", "readingProgress");
+        p.updated = Sync.normalizeTimestamp(longOf(src, "updateTime", "updatedAt", "update_time"));
+        p.readSeconds = numOf(src, "recordReadingTime", "readingTime");
+        p.finished = numOf(src, "finishTime", "finish") > 0;
+        return p;
+    }
+
+    private static String strOf(Object o, String... keys) {
+        return Json.str(o, keys);
+    }
+
+    /** 依次尝试多个 key，返回第一个非零整数（0 也视为缺省，继续找下一个）。 */
+    private static int numOf(Object o, String... keys) {
+        for (String k : keys) {
+            int v = Json.num(o, k);
+            if (v != 0) return v;
+        }
+        return 0;
+    }
+
+    private static long longOf(Object o, String... keys) {
+        for (String k : keys) {
+            long v = Json.longNum(o, k);
+            if (v != 0L) return v;
+        }
+        return 0L;
+    }
+
     private static boolean isAuthError(IOException e) {
         String m = e.getMessage() == null ? "" : e.getMessage();
         return m.contains("-2012") || m.contains("401") || m.contains("登录");

@@ -51,6 +51,9 @@ public class ReaderActivity extends Activity implements PageView.Callback {
     private View paraPanel;
     private TextView paraCardFlush;
     private TextView paraCardIndent;
+    private TextView gapMinus;
+    private TextView gapValue;
+    private TextView gapPlus;
     private View progressPanel;
     private SeekRow progressRow;
     private TextView progressPercent;
@@ -204,7 +207,7 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         pageView.setLinePct(store.linePct());
         pageView.setMarginDp(store.marginDp());
         pageView.setIndentCells(store.indentCells());
-        pageView.setParaGap(store.paraGap());
+        pageView.setParaGap(store.paraGapN());
         page.addView(pageView, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         root.addView(page, new FrameLayout.LayoutParams(
@@ -984,7 +987,7 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         panel.addView(cards, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        // 段间距开关
+        // 段间距：−/档位/＋，0 关闭
         LinearLayout gapRow = new LinearLayout(this);
         gapRow.setOrientation(LinearLayout.HORIZONTAL);
         gapRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -992,17 +995,27 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         TextView gl = Ui.text(this, "段间距", 14, Ui.INK);
         gapRow.addView(gl, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        final Toggle gapToggle = new Toggle(this);
-        gapToggle.setChecked(store.paraGap());
-        gapToggle.setOnChange(new Toggle.OnChange() {
+        gapMinus = stepButton("−");
+        gapMinus.setOnClickListener(new View.OnClickListener() {
             @Override
-            public void onChange(boolean checked) {
-                store.setParaGap(checked);
-                pageView.setParaGap(checked);
-                savePos();
+            public void onClick(View v) {
+                setParaGapN(store.paraGapN() - 1);
             }
         });
-        gapRow.addView(gapToggle);
+        gapRow.addView(gapMinus);
+        gapValue = Ui.text(this, "", 13, Ui.INK);
+        gapValue.setGravity(Gravity.CENTER);
+        gapValue.setMinWidth(dp(58));
+        gapRow.addView(gapValue);
+        gapPlus = stepButton("+");
+        gapPlus.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                setParaGapN(store.paraGapN() + 1);
+            }
+        });
+        gapRow.addView(gapPlus);
+        refreshGapRow();
         panel.addView(gapRow, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -1053,10 +1066,30 @@ public class ReaderActivity extends Activity implements PageView.Callback {
                 selected ? Ui.INK : Ui.LINE, 1, dp(8)));
     }
 
+    /** 段间距档位（0–4）：0 关闭，1 档约 0.35 倍字高。 */
+    private void setParaGapN(int n) {
+        n = Math.max(0, Math.min(4, n));
+        store.setParaGapN(n);
+        pageView.setParaGap(n);
+        refreshGapRow();
+        savePos();
+    }
+
+    private void refreshGapRow() {
+        if (gapValue == null) return;
+        int n = store.paraGapN();
+        gapValue.setText(n == 0 ? "关" : String.valueOf(n));
+        gapMinus.setEnabled(n > 0);
+        gapMinus.setTextColor(n > 0 ? Ui.INK : 0xFFBBBBBB);
+        gapPlus.setEnabled(n < 4);
+        gapPlus.setTextColor(n < 4 ? Ui.INK : 0xFFBBBBBB);
+    }
+
     private void showParaPanel(boolean show) {
         if (paraPanel == null) return;
         if (show) {
             refreshParaCards();
+            refreshGapRow();
             displayPanel.setVisibility(View.GONE);
         }
         paraPanel.setVisibility(show ? View.VISIBLE : View.GONE);
@@ -1467,6 +1500,10 @@ public class ReaderActivity extends Activity implements PageView.Callback {
             }
             final int index = row.chapterIndex;
             title.setText(String.valueOf(chapters.get(index).get("title")));
+            int level = chapters.get(index).get("level") instanceof Number
+                    ? ((Number) chapters.get(index).get("level")).intValue() : 1;
+            boolean isVolume = level <= 1;
+            title.setPadding(dp(20 * (level - 1)), 0, 0, 0);
             boolean isCurrent = index == chapterIndex;
             if (isCurrent) {
                 // 图2：当前章整行黑底白字高亮，页码也是白色
@@ -1475,14 +1512,12 @@ public class ReaderActivity extends Activity implements PageView.Callback {
                 title.setTypeface(Typeface.DEFAULT_BOLD);
                 words.setTextColor(Color.WHITE);
             } else {
+                // 卷级加粗深色，子级浅色缩进——像官方目录的层级
                 v.setBackgroundColor(Color.WHITE);
-                title.setTextColor(Ui.SUB);
-                title.setTypeface(Typeface.DEFAULT);
+                title.setTextColor(isVolume ? Ui.INK : Ui.SUB);
+                title.setTypeface(isVolume ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
                 words.setTextColor(0xFFB0B0B0);
             }
-            int level = chapters.get(index).get("level") instanceof Number
-                    ? ((Number) chapters.get(index).get("level")).intValue() : 0;
-            title.setPadding(dp(level > 1 ? 14 : 0), 0, 0, 0);
             words.setText(row.pos > 0 ? String.valueOf(row.pos) : "");
             v.setOnClickListener(new View.OnClickListener() {
                 @Override
@@ -1918,7 +1953,10 @@ public class ReaderActivity extends Activity implements PageView.Callback {
                 fail(e);
                 return;
             }
-            author = "本地导入";
+            Map<String, Object> meta = LocalBooks.meta(this, bookId);
+            author = meta == null ? "本地导入"
+                    : String.valueOf(meta.get("author"));
+            if (author == null || author.length() == 0 || "null".equals(author)) author = "本地导入";
             if (tocAuthor != null) tocAuthor.setText(author);
             int index = store.lastIndex(bookId);
             if (index < 0 || index >= chapters.size()) index = 0;

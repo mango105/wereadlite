@@ -80,20 +80,29 @@ final class Covers {
             @Override
             public void run() {
                 Bitmap bmp = null;
-                File file = new File(dir, name(key) + ".png");
-                try {
-                    if (file.exists()) bmp = decode(file, w, h);
-                } catch (Throwable ignore) {
-                }
-                if (bmp == null) {
+                // 本地书封面：file: 直接读文件，不走磁盘缓存
+                if (url.startsWith("file:")) {
                     try {
-                        bmp = fetch(url, w, h);
-                        if (bmp != null) write(bmp, file);
-                    } catch (Throwable t) {
-                        Log.w(TAG, "cover download failed: " + t);
+                        bmp = decode(new File(url.substring(5)), w, h);
+                    } catch (Throwable ignore) {
                     }
+                    if (bmp == null) return;
+                } else {
+                    File file = new File(dir, name(key) + ".png");
+                    try {
+                        if (file.exists()) bmp = decode(file, w, h);
+                    } catch (Throwable ignore) {
+                    }
+                    if (bmp == null) {
+                        try {
+                            bmp = fetch(url, w, h);
+                            if (bmp != null) write(bmp, file);
+                        } catch (Throwable t) {
+                            Log.w(TAG, "cover download failed: " + t);
+                        }
+                    }
+                    if (bmp == null) return;
                 }
-                if (bmp == null) return;
                 synchronized (MEM) {
                     MEM.put(key, bmp);
                 }

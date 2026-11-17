@@ -46,7 +46,8 @@ public final class Backup {
                 || k.equals("fontSize") || k.equals("indentCells") || k.equals("linePct")
                 || k.equals("marginDp") || k.equals("volumePaging")
                 || k.equals("progressWholeBook") || k.equals("keepAwake") || k.equals("compat")
-                || k.equals("syncOnOpen") || k.equals("syncOnClose") || k.equals("paraGap");
+                || k.equals("syncOnOpen") || k.equals("syncOnClose")
+                || k.equals("paraGap") || k.equals("paraGapN");
     }
 
     private Backup() {

@@ -122,14 +122,28 @@ public final class LocalBooks {
         for (File d : sorted) {
             Map<String, Object> meta = readMeta(d);
             if (meta == null) continue;
+            // 封面是本地文件，转成 file: 绝对路径给 Covers.load
+            String cover = Json.str(meta, "cover");
+            if (cover != null && cover.length() > 0) {
+                File img = new File(d, cover);
+                if (img.exists()) meta.put("cover", "file:" + img.getAbsolutePath());
+            }
             out.add(toShelfRow(d.getName(), meta));
         }
         return out;
     }
 
-    /** 单本的 meta（书架、阅读器都会用）。 */
+    /** 单本的 meta（书架、阅读器都会用）；cover 字段补成本地绝对路径。 */
     public static Map<String, Object> meta(Context c, String bookId) {
-        return readMeta(dirOf(c, bookId));
+        Map<String, Object> meta = readMeta(dirOf(c, bookId));
+        if (meta != null) {
+            String cover = Json.str(meta, "cover");
+            if (cover != null && cover.length() > 0) {
+                File img = new File(dirOf(c, bookId), cover);
+                if (img.exists()) meta.put("cover", "file:" + img.getAbsolutePath());
+            }
+        }
+        return meta;
     }
 
     private static Map<String, Object> toShelfRow(String key, Map<String, Object> meta) {
@@ -137,7 +151,7 @@ public final class LocalBooks {
         row.put("bookId", PREFIX + key);
         row.put("title", Json.str(meta, "title"));
         row.put("author", Json.str(meta, "author"));
-        row.put("cover", "");
+        row.put("cover", Json.str(meta, "cover"));
         row.put("secret", Integer.valueOf(0));
         row.put("local", Boolean.TRUE);
         row.put("format", Json.str(meta, "format"));
@@ -158,22 +172,44 @@ public final class LocalBooks {
 
     // ---------------- 阅读器接口 ----------------
 
-    /** 与 api.catalog 同结构，供目录抽屉直接使用。 */
+    /** 与 api.catalog 同结构，供目录抽屉直接使用；EPUB 优先用 toc 的层级目录。 */
     public static List<Map<String, Object>> catalog(Context c, String bookId) throws IOException {
         Map<String, Object> meta = meta(c, bookId);
         if (meta == null) throw new IOException("本地书已丢失");
         List<Map<String, Object>> out = new ArrayList<Map<String, Object>>();
+        List<Object> toc = Json.list(meta, "toc");
         List<Object> titles = Json.list(meta, "titles");
         List<Object> words = Json.list(meta, "words");
-        for (int i = 0; i < titles.size(); i++) {
+        for (int i = 0; i < toc.size(); i++) {
+            Map<String, Object> t = Json.asMap(toc.get(i));
+            int ci = (int) Json.num(t, "c");
+            if (ci < 0 || ci >= titles.size()) continue;
             Map<String, Object> row = new HashMap<String, Object>();
-            row.put("uid", String.valueOf(i));
-            row.put("title", String.valueOf(titles.get(i)));
-            row.put("level", Integer.valueOf(1));
-            row.put("wordCount", words.size() > i ? words.get(i) : Integer.valueOf(0));
+            row.put("uid", String.valueOf(ci));
+            row.put("title", Json.str(t, "t"));
+            row.put("level", Integer.valueOf((int) Math.max(1, Json.num(t, "l"))));
+            row.put("wordCount", words.size() > ci ? words.get(ci) : Integer.valueOf(0));
             out.add(row);
         }
+        if (out.isEmpty()) {
+            for (int i = 0; i < titles.size(); i++) {
+                Map<String, Object> row = new HashMap<String, Object>();
+                row.put("uid", String.valueOf(i));
+                row.put("title", String.valueOf(titles.get(i)));
+                row.put("level", Integer.valueOf(1));
+                row.put("wordCount", words.size() > i ? words.get(i) : Integer.valueOf(0));
+                out.add(row);
+            }
+        }
         if (out.isEmpty()) throw new IOException("本地书没有内容");
+        // toc 顺序基本等于 spine 顺序，但万一不齐，按章节下标排一次保证阅读顺序
+        java.util.Collections.sort(out, new java.util.Comparator<Map<String, Object>>() {
+            @Override
+            public int compare(Map<String, Object> a, Map<String, Object> b) {
+                return Store.parseInt(String.valueOf(a.get("uid")))
+                        - Store.parseInt(String.valueOf(b.get("uid")));
+            }
+        });
         return out;
     }
 
@@ -220,11 +256,22 @@ public final class LocalBooks {
     private static String importCore(Context c, File tmp, String displayName) throws Exception {
         String name = displayName == null ? "" : displayName.trim();
         List<String[]> chapters;
+        List<String[]> nav = null;      // [title, chapterIndex, level]
+        String author = null;
+        String bookTitle = null;
+        byte[] cover = null;
+        String coverExt = "jpg";
         String format;
         byte[] head = readHead(tmp, 4);
         boolean zip = head.length >= 2 && (head[0] & 0xFF) == 'P' && (head[1] & 0xFF) == 'K';
         if (zip) {
-            chapters = parseEpub(tmp);
+            EpubBook epub = parseEpub(tmp);
+            chapters = epub.chapters;
+            nav = epub.nav.isEmpty() ? null : epub.nav;
+            author = epub.author;
+            bookTitle = epub.title;
+            cover = epub.cover;
+            coverExt = epub.coverExt;
             format = "epub";
         } else {
             chapters = parseTxt(tmp);
@@ -240,10 +287,24 @@ public final class LocalBooks {
         if (low.endsWith(".txt")) base = base.substring(0, base.length() - 4).trim();
         else if (low.endsWith(".epub")) base = base.substring(0, base.length() - 5).trim();
         if (base.length() == 0) base = "本地书";
+        // EPUB 元数据里的书名/作者更准，优先用
+        if (bookTitle != null && bookTitle.length() > 0) base = bookTitle;
+        if (author == null || author.length() == 0) author = "本地导入";
 
         String key = "l" + Long.toString(System.currentTimeMillis(), 36);
         File dir = new File(root(c), key);
         if (!dir.mkdirs()) throw new IOException("无法创建书目录");
+
+        // 封面图落盘（书架 / 目录标题栏显示用）
+        if (cover != null) {
+            FileOutputStream co = null;
+            try {
+                co = new FileOutputStream(new File(dir, "cover." + coverExt));
+                co.write(cover);
+            } finally {
+                if (co != null) try { co.close(); } catch (IOException ignored) { }
+            }
+        }
 
         List<String> titles = new ArrayList<String>();
         List<Integer> words = new ArrayList<Integer>();
@@ -264,11 +325,13 @@ public final class LocalBooks {
 
         StringBuilder sb = new StringBuilder();
         sb.append("{\"title\":").append(Json.quote(base));
-        sb.append(",\"author\":\"本地导入\"");
+        sb.append(",\"author\":").append(Json.quote(author));
         sb.append(",\"format\":").append(Json.quote(format));
         sb.append(",\"chapters\":").append(chapters.size());
         sb.append(",\"bytes\":").append(tmp.length());
         sb.append(",\"at\":").append(System.currentTimeMillis());
+        sb.append(",\"cover\":").append(Json.quote(
+                cover == null ? "" : ("cover." + coverExt)));
         sb.append(",\"titles\":[");
         for (int i = 0; i < titles.size(); i++) {
             if (i > 0) sb.append(',');
@@ -278,6 +341,16 @@ public final class LocalBooks {
         for (int i = 0; i < words.size(); i++) {
             if (i > 0) sb.append(',');
             sb.append(words.get(i).intValue());
+        }
+        if (nav != null) {
+            sb.append("],\"toc\":[");
+            for (int i = 0; i < nav.size(); i++) {
+                String[] n = nav.get(i);
+                if (i > 0) sb.append(',');
+                sb.append("{\"t\":").append(Json.quote(n[0]));
+                sb.append(",\"c\":").append(Store.parseInt(n[1]));
+                sb.append(",\"l\":").append(Math.max(1, Store.parseInt(n[2]))).append('}');
+            }
         }
         sb.append("]}");
 
@@ -349,8 +422,18 @@ public final class LocalBooks {
 
     // ---------------- EPUB ----------------
 
-    private static List<String[]> parseEpub(File f) throws Exception {
-        List<String[]> out = new ArrayList<String[]>();
+    /** EPUB 解析产物：章节正文 + 元数据 + 封面 + 带层级的目录。 */
+    static final class EpubBook {
+        final List<String[]> chapters = new ArrayList<String[]>();   // [title, text]
+        final List<String[]> nav = new ArrayList<String[]>();        // [title, chapterIndex, level]
+        String author = "";
+        String title = "";
+        byte[] cover;          // 封面图原始字节，可能为 null
+        String coverExt = "jpg";
+    }
+
+    private static EpubBook parseEpub(File f) throws Exception {
+        EpubBook book = new EpubBook();
         ZipFile zip = new ZipFile(f);
         try {
             String container = new String(readEntry(zip, "META-INF/container.xml"), "UTF-8");
@@ -359,92 +442,161 @@ public final class LocalBooks {
             String opf = new String(readEntry(zip, opfPath), "UTF-8");
             String baseDir = parent(opfPath);
 
-            // manifest: id -> href
-            Map<String, String> hrefById = new HashMap<String, String>();
+            // opf 元数据：书名 / 作者 / 封面
+            book.title = firstTag(opf, "title");
+            book.author = firstTag(opf, "creator");
+            String coverHref = null;
+            // 方式一：manifest 里 properties="cover-image"（EPUB3）
             Matcher item = Pattern.compile("<item\\b[^>]*>", Pattern.CASE_INSENSITIVE).matcher(opf);
+            Map<String, String> hrefById = new HashMap<String, String>();
+            Map<String, String> typeById = new HashMap<String, String>();
             String ncxHref = null;
             while (item.find()) {
                 String tag = item.group();
                 String id = attr(tag, null, "id");
                 String href = attr(tag, null, "href");
                 String type = attr(tag, null, "media-type");
+                String props = attr(tag, null, "properties");
                 if (id == null || href == null) continue;
                 hrefById.put(id, href);
+                if (type != null) typeById.put(id, type);
+                if (props != null && props.contains("cover-image")) coverHref = href;
                 if (type != null && type.contains("dtbncx")) ncxHref = href;
             }
+            // 方式二：<meta name="cover" content="图片id">（EPUB2 惯例）
+            if (coverHref == null) {
+                Matcher meta = Pattern.compile("<meta\\b[^>]*>", Pattern.CASE_INSENSITIVE).matcher(opf);
+                while (meta.find()) {
+                    String tag = meta.group();
+                    if (!"cover".equalsIgnoreCase(attr(tag, null, "name"))) continue;
+                    String id = attr(tag, null, "content");
+                    String href = id == null ? null : hrefById.get(id);
+                    String type = id == null ? null : typeById.get(id);
+                    if (href != null && type != null && type.startsWith("image/")) {
+                        coverHref = href;
+                        break;
+                    }
+                }
+            }
+            if (coverHref != null) {
+                byte[] img = readEntry(zip, join(baseDir, coverHref));
+                if (img != null && img.length > 128) {
+                    book.cover = img;
+                    String low = coverHref.toLowerCase();
+                    book.coverExt = low.endsWith(".png") ? "png"
+                            : (low.endsWith(".gif") ? "gif" : "jpg");
+                }
+            }
 
-            Map<String, String> titleByHref = new HashMap<String, String>();
+            // 目录（toc.ncx）：递归 navPoint 记层级；EPUB3 的 nav.xhtml 也兜一把
+            List<String[]> navRaw = new ArrayList<String[]>();   // [href, title, level]
             if (ncxHref != null) {
                 String ncx = new String(readEntry(zip, join(baseDir, ncxHref)), "UTF-8");
-                Matcher nav = Pattern.compile(
-                        "<navPoint\\b[\\s\\S]{0,800}?</navPoint>", Pattern.CASE_INSENSITIVE).matcher(ncx);
-                while (nav.find()) {
-                    String block = nav.group();
+                Matcher np = Pattern.compile("<navPoint\\b[^>]*>|</navPoint>",
+                        Pattern.CASE_INSENSITIVE).matcher(ncx);
+                int depth = 0;
+                while (np.find()) {
+                    if (np.group().startsWith("</")) {
+                        if (depth > 0) depth--;
+                        continue;
+                    }
+                    depth++;
+                    String block = ncx.substring(np.end(),
+                            Math.min(ncx.length(), np.end() + 1500));
                     String src = attr(block, "content", "src");
                     Matcher t = Pattern.compile("<text>(.*?)</text>",
                             Pattern.CASE_INSENSITIVE | Pattern.DOTALL).matcher(block);
                     if (src != null && t.find()) {
-                        titleByHref.put(strip(src), Protocol.htmlToText(t.group(1)).trim());
+                        String title = Protocol.htmlToText(t.group(1)).trim();
+                        if (title.length() > 0) {
+                            // 和 spine 页一样按规范化路径存，后面才能对上
+                            navRaw.add(new String[]{strip(join(baseDir, src)), title,
+                                    String.valueOf(depth)});
+                        }
                     }
                 }
             }
 
-            // spine 顺序取正文
+            // spine 顺序取正文：扉页 / 版权页这类短页也保留（官方目录里它们是独立条目），
+            // 只跳过纯封面页和近乎空白的页——封面自己有图展示，留着反而重复。
             Matcher ref = Pattern.compile("<itemref\\b[^>]*>", Pattern.CASE_INSENSITIVE).matcher(opf);
-            int index = 0;
-            List<String> done = new ArrayList<String>();
+            List<String[]> pages = new ArrayList<String[]>();    // [zip路径, title, text]
+            List<Integer> pageSp = new ArrayList<Integer>();     // 与 pages 对齐：spine 序号
+            Map<String, Integer> spinePos = new HashMap<String, Integer>();  // zip路径 -> spine 序号
+            int sp = 0;
             while (ref.find()) {
                 String idref = attr(ref.group(), null, "idref");
                 if (idref == null) continue;
                 String href = hrefById.get(idref);
                 if (href == null) continue;
+                sp++;
                 String path = join(baseDir, href);
-                if (done.contains(path)) continue;
-                done.add(path);
+                if (dupPage(pages, path)) continue;              // 同一文件多次进 spine
                 byte[] bytes = readEntry(zip, path);
                 if (bytes == null) continue;
+                String low = strip(href).toLowerCase();
                 String text = Protocol.htmlToText(decode(bytes)).trim();
-                if (text.length() < 20) continue;   // 封面页、版权页
-                String title = titleByHref.get(strip(href));
+                if (low.contains("cover") || text.length() < 8) {
+                    spinePos.put(path, Integer.valueOf(sp));     // 封面 / 空白页：只记位置不进正文
+                    continue;
+                }
+                spinePos.put(path, Integer.valueOf(sp));
+                String title = null;
+                for (String[] n : navRaw) {
+                    if (n[0].equals(path)) { title = n[1]; break; }
+                }
                 if (title == null || title.length() == 0) {
                     Matcher tm = Pattern.compile("<title>(.*?)</title>",
                             Pattern.CASE_INSENSITIVE | Pattern.DOTALL).matcher(
                             new String(bytes, "UTF-8"));
                     title = tm.find() ? Protocol.htmlToText(tm.group(1)).trim() : "";
                 }
-                if (title == null || title.length() == 0) title = "第 " + (++index) + " 节";
-                // 很多 EPUB 把目录页也放进 spine，正文第一页变成一串章节名，跳过它
-                if (looksLikeToc(href, title, text)) continue;
-                out.add(new String[]{title, dropLeading(text, title)});
+                if (title == null || title.length() == 0) {
+                    title = "第 " + (pages.size() + 1) + " 节";
+                }
+                pages.add(new String[]{path, title, dropLeading(text, title)});
+                pageSp.add(Integer.valueOf(sp));
+            }
+
+            // 目录树：nav 指向的页可能被跳过（封面），归到它后面第一个保留章节
+            for (String[] n : navRaw) {
+                Integer s = spinePos.get(n[0]);
+                if (s == null) continue;
+                int ci = -1;
+                for (int i = 0; i < pageSp.size(); i++) {
+                    if (pageSp.get(i).intValue() >= s.intValue()) {
+                        ci = i;
+                        break;
+                    }
+                }
+                if (ci >= 0 && ci < pages.size()) {
+                    book.nav.add(new String[]{n[1], String.valueOf(ci), n[2]});
+                }
+            }
+
+            for (String[] p : pages) {
+                book.chapters.add(new String[]{p[1], p[2]});
             }
         } finally {
             try { zip.close(); } catch (IOException ignored) { }
         }
-        return out;
+        return book;
     }
 
-    /** 判断这一页是不是目录/封面，这类页当章节读很别扭（还容易把全书页数算歪）。 */
-    private static boolean looksLikeToc(String href, String title, String text) {
-        if (text != null && text.length() > 6000) return false;   // 这么长肯定是正文
-        String t = title == null ? "" : title.trim().toLowerCase();
-        if (t.contains("目录") || t.contains("目次") || t.contains("contents")
-                || t.equals("toc") || t.contains("封面") || t.equals("cover")) return true;
-        String h = href == null ? "" : href.toLowerCase();
-        if (h.contains("toc") || h.contains("nav") || h.endsWith("contents.html")
-                || h.endsWith("contents.xhtml") || h.endsWith("contents.htm")) return true;
-        // 还有一种是「整页只有 第一章 第二章…」，也是目录（分卷前的章名列表）
-        int lines = 0;
-        int chapters = 0;
-        String[] rows = (text == null ? "" : text).split("\n");
-        for (String row : rows) {
-            String s = trimU(row);
-            if (s.length() == 0) continue;
-            lines++;
-            if (s.matches("^第[0-9一二三四五六七八九十百千零〇两]{1,10}[章回节卷篇集部][ 　]*$")) {
-                chapters++;
-            }
+    /** 同一文件在 spine 里出现多次（EPUB 偶见），只收第一次。 */
+    private static boolean dupPage(List<String[]> pages, String path) {
+        for (String[] p : pages) {
+            if (p[0].equals(path)) return true;
         }
-        return lines >= 5 && chapters * 10 >= lines * 8;
+        return false;
+    }
+
+    /** 取 <tag> 文本；兼容 dc:title / dc:creator 这类带命名空间前缀的标签。 */
+    private static String firstTag(String src, String tag) {
+        Matcher m = Pattern.compile("<(?:[\\w.-]+:)?(?:" + tag + ")\\b[^>]*>([\\s\\S]{0,400}?)</(?:[\\w.-]+:)?(?:" + tag + ")>",
+                Pattern.CASE_INSENSITIVE).matcher(src);
+        if (!m.find()) return "";
+        return Protocol.htmlToText(m.group(1)).trim();
     }
 
     /** 去掉首尾空白，包括全角空格和不间断空格（String.trim 只认 <= 0x20）。 */

@@ -581,27 +581,47 @@ public class SelfTest {
                         + "<rootfile full-path='OEBPS/content.opf' media-type='application/oebps-package+xml'/>"
                         + "</rootfiles></container>");
         put(z, "OEBPS/content.opf",
-                "<?xml version='1.0'?><package version='2.0' unique-identifier='bid'><manifest>"
+                "<?xml version='1.0'?><package version='2.0' unique-identifier='bid'>"
+                        + "<metadata xmlns:dc='http://purl.org/dc/elements/1.1/'>"
+                        + "<dc:title>测试之书</dc:title><dc:creator>熊十力</dc:creator>"
+                        + "<meta name='cover' content='coverimg'/>"
+                        + "</metadata><manifest>"
                         + "<item id='cover' href='cover.xhtml' media-type='application/xhtml+xml'/>"
                         + "<item id='ncx' href='toc.ncx' media-type='application/x-dtbncx+xml'/>"
                         + "<item id='tocx' href='toc.xhtml' media-type='application/xhtml+xml'/>"
+                        + "<item id='vol1' href='text/vol1.xhtml' media-type='application/xhtml+xml'/>"
                         + "<item id='c1' href='text/ch1.xhtml' media-type='application/xhtml+xml'/>"
                         + "<item id='c2' href='text/../text/ch2.xhtml' media-type='application/xhtml+xml'/>"
+                        + "<item id='coverimg' href='Images/cover.jpg' media-type='image/jpeg'"
+                        + " properties='cover-image'/>"
                         + "</manifest><spine toc='ncx'>"
                         + "<itemref idref='cover'/><itemref idref='tocx'/>"
+                        + "<itemref idref='vol1'/>"
                         + "<itemref idref='c1'/><itemref idref='c1'/><itemref idref='c2'/>"
                         + "</spine></package>");
+        byte[] coverBytes = new byte[200];
+        coverBytes[0] = (byte) 0xFF;
+        coverBytes[1] = (byte) 0xD8;
+        coverBytes[2] = (byte) 0xE0;
+        put(z, "OEBPS/Images/cover.jpg", coverBytes);
         put(z, "OEBPS/toc.ncx",
                 "<ncx><navMap>"
-                        + "<navPoint id='n1' playOrder='1'><navLabel><text>第一章 浮世绘</text></navLabel>"
+                        + "<navPoint id='n0' playOrder='1'><navLabel><text>总目录</text></navLabel>"
+                        + "<content src='toc.xhtml'/></navPoint>"
+                        + "<navPoint id='n1' playOrder='2'><navLabel><text>第一卷 卷名</text></navLabel>"
+                        + "<content src='text/vol1.xhtml'/>"
+                        + "<navPoint id='n1a' playOrder='3'><navLabel><text>第一章 浮世绘</text></navLabel>"
                         + "<content src='text/ch1.xhtml#frag'/></navPoint>"
-                        + "<navPoint id='n2' playOrder='2'><navLabel><text>第二章 伦敦雨</text></navLabel>"
+                        + "</navPoint>"
+                        + "<navPoint id='n2' playOrder='4'><navLabel><text>第二章 伦敦雨</text></navLabel>"
                         + "<content src='text/ch2.xhtml'/></navPoint>"
                         + "</navMap></ncx>");
         put(z, "OEBPS/cover.xhtml", "<html><head><title></title></head><body><img src='a.jpg'/></body></html>");
         put(z, "OEBPS/toc.xhtml",
                 "<html><body><h1>目录</h1><div>第一章</div><div>第二章</div><div>第三章</div>"
                         + "<div>第四章</div><div>第五章</div></body></html>");
+        put(z, "OEBPS/text/vol1.xhtml",
+                "<html><body><p>第一卷 木兰歌</p><p>卷首题记也占一行。</p></body></html>");
         put(z, "OEBPS/text/ch1.xhtml",
                 "<html><head><title>第一章 浮世绘</title></head><body><h1>第一章 浮世绘</h1>"
                         + "<p>这一章写江户街市的光影与人群，足够长以避开封面页判定。</p>"
@@ -610,13 +630,30 @@ public class SelfTest {
                 "<html><body><p>没有标题标签的一章，正文必须超过二十个字符才会被保留下来。</p></body></html>");
         z.close();
 
-        List<String[]> out = (List<String[]>) reflect("com.modu.wereadlite.LocalBooks", "parseEpub", epub);
-        eq("EPUB 跳过封面/目录/重复", out.size(), 2);
-        eq("EPUB 章名取 ncx", at(out, 0), "第一章 浮世绘");
-        eq("EPUB 正文去掉重复标题", bodyAt(out, 0),
+        Object bookObj = reflect("com.modu.wereadlite.LocalBooks", "parseEpub", epub);
+        List<String[]> out = (List<String[]>) field(bookObj, "chapters");
+        Object author = field(bookObj, "author");
+        Object bookTitle = field(bookObj, "title");
+        Object cover = field(bookObj, "cover");
+        eq("EPUB 元数据书名", String.valueOf(bookTitle), "测试之书");
+        eq("EPUB 元数据作者", String.valueOf(author), "熊十力");
+        yes("EPUB 提取封面字节", cover != null && ((byte[]) cover).length > 16);
+        eq("EPUB 跳过封面/重复", out.size(), 4);   // toc/卷首页保留为章节（官方目录也保留它们）
+        eq("EPUB 目录页标题取 ncx", at(out, 0), "总目录");
+        eq("EPUB 卷标题取 ncx", at(out, 1), "第一卷 卷名");
+        eq("EPUB 章名取 ncx", at(out, 2), "第一章 浮世绘");
+        eq("EPUB 正文去掉重复标题", bodyAt(out, 2),
                 "这一章写江户街市的光影与人群，足够长以避开封面页判定。\n第二段同样留在本章之内。");
-        yes("EPUB ../ 相对路径仍读到正文", out.size() > 1 && bodyAt(out, 1).length() > 10);
-        yes("EPUB 无标题时兜底命名", at(out, 1).startsWith("第 "));
+        yes("EPUB ../ 相对路径仍读到正文", out.size() > 3 && bodyAt(out, 3).length() > 10);
+        List<String[]> nav = (List<String[]>) field(bookObj, "nav");
+        eq("EPUB 目录条目数", nav.size(), 4);
+        eq("EPUB 总目录归属", nav.get(0)[1], "0");
+        eq("EPUB 卷归属", nav.get(1)[1], "1");
+        eq("EPUB 卷深度", nav.get(1)[2], "1");
+        eq("EPUB 子条目层级", at(nav, 2), "第一章 浮世绘");
+        eq("EPUB 子条目归属章", nav.get(2)[1], "2");
+        eq("EPUB 子条目深度", nav.get(2)[2], "2");
+        eq("EPUB 目录指向保留章", nav.get(3)[1], "3");
 
         File bad = new File(dir(), "bad.epub");
         ZipOutputStream b = new ZipOutputStream(new FileOutputStream(bad));
@@ -629,6 +666,13 @@ public class SelfTest {
             threw = true;
         }
         yes("缺 container.xml 明确报错", threw);
+    }
+
+    /** 读对象私有字段（测试专用）。 */
+    static Object field(Object o, String name) throws Exception {
+        java.lang.reflect.Field f = o.getClass().getDeclaredField(name);
+        f.setAccessible(true);
+        return f.get(o);
     }
 
     // ---------- 临时文件 ----------
@@ -662,6 +706,12 @@ public class SelfTest {
         z.putNextEntry(new ZipEntry(path));
         byte[] b = text.getBytes("UTF-8");
         z.write(b, 0, b.length);
+        z.closeEntry();
+    }
+
+    static void put(ZipOutputStream z, String path, byte[] data) throws Exception {
+        z.putNextEntry(new ZipEntry(path));
+        z.write(data, 0, data.length);
         z.closeEntry();
     }
 

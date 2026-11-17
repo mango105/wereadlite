@@ -81,12 +81,14 @@ public final class Store {
         sp.edit().putInt("indentCells", v).commit();
     }
 
-    public boolean paraGap() {
-        return sp.getBoolean("paraGap", false);
+    /** 段间距档位 0–4（0 关闭）。老版本是布尔值，读一次自动迁移成档位。 */
+    public int paraGapN() {
+        if (sp.contains("paraGapN")) return sp.getInt("paraGapN", 0);
+        return sp.getBoolean("paraGap", false) ? 1 : 0;
     }
 
-    public void setParaGap(boolean v) {
-        sp.edit().putBoolean("paraGap", v).commit();
+    public void setParaGapN(int v) {
+        sp.edit().putInt("paraGapN", Math.max(0, Math.min(4, v))).commit();
     }
 
     /** 行距百分比，116 = 1.16 倍。旧版本存的是 0/1/2 档位，这里做一次迁移。 */
@@ -442,6 +444,10 @@ public final class Store {
                         Bookmarks.decode(sp.getString(k, "")), Bookmarks.decode(v));
                 String enc = Bookmarks.encode(merged);
                 if (!enc.equals(sp.getString(k, ""))) { ed.putString(k, enc); n++; }
+            } else if (k.equals("paraGapN")) {
+                // 新键老设备上可能没有本地值，不能落成字符串
+                ed.putInt(k, Store.parseInt(v));
+                n++;
             } else {
                 // 设置项：值可能是"true"/数字，按原类型写回
                 Object cur = sp.getAll().get(k);

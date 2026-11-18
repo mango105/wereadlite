@@ -41,6 +41,7 @@ public final class Backup {
         if (k == null) return false;
         return k.startsWith("lp_") || k.startsWith("mk_") || k.startsWith("rt_")
                 || k.startsWith("bm_") || k.startsWith("rd_") || k.equals("einkRead")
+                || k.startsWith("hl_")
                 || k.startsWith("pd_") || k.startsWith("pl_at_")
                 || k.startsWith("ps_at_") || k.startsWith("se_")
                 || k.equals("fontSize") || k.equals("indentCells") || k.equals("linePct")

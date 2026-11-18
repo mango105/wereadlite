@@ -321,6 +321,136 @@ public final class Protocol {
 
     private static final Pattern NUMERIC = Pattern.compile("&#(x?)([0-9A-Fa-f]+);");
 
+    /**
+     * 章节 HTML ↔ 纯文本坐标映射（写划线上传用）。
+     *
+     * 微信读书的划线 range 是「章节原始 HTML 的字符索引」（如 "383-415"，0 起、
+     * 不含 BOM），官方阅读器靠这个把划线画回正文。我们是纯文本排版，所以加载
+     * 章节时保留原始 HTML，选中后用这里的对齐算法把纯文本区间映射回 HTML 索引。
+     *
+     * 算法与 MiuRead 的 posmap 同思路：跳过标签字符、实体解码后映射到实体起点；
+     * 空白差异（换行折叠、行尾 trim）在对齐时跳过。正文里偶发非 BMP 字符会差
+     * 一两位，可接受。映射失败返回 null，调用方降级为仅本地划线。
+     *
+     * @return int[2] = {start, end}，HTML 0 起字符索引（BMP 内容即 rune 索引）
+     */
+    public static int[] htmlRange(String html, String plainText, int textStart, int textEnd) {
+        if (html == null || html.length() == 0 || plainText == null) return null;
+        if (html.startsWith("\ufeff")) html = html.substring(1);   // 官方 range 不含 BOM
+        // 第一步：HTML → 可见文本流（跳过标签，实体解码），记录每个字符的 HTML 起止索引
+        int[] runeIdx = new int[html.length()];
+        int[] runeEnd = new int[html.length()];
+        StringBuilder plain = new StringBuilder(html.length());
+        int i = 0;
+        while (i < html.length()) {
+            char c = html.charAt(i);
+            if (c == '<') {
+                int close = html.indexOf('>', i);
+                if (close < 0) break;
+                i = close + 1;
+                continue;
+            }
+            if (c == '&') {
+                int semi = html.indexOf(';', i);
+                char dec = semi > i && semi - i <= 10
+                        ? decodeEntity(html.substring(i + 1, semi)) : 0;
+                if (dec != 0) {
+                    runeIdx[plain.length()] = i;
+                    runeEnd[plain.length()] = semi + 1;
+                    plain.append(dec);
+                    i = semi + 1;
+                    continue;
+                }
+            }
+            runeIdx[plain.length()] = i;
+            runeEnd[plain.length()] = i + 1;
+            plain.append(c);
+            i++;
+        }
+        // 第二步：正文区间逐字符对齐到文本流（跳过空白差异）。
+        // 对齐必须从 t=0 走起：选区之前的正文也要先消耗掉，否则中后段选区
+        // 第一个字符就和流开头对不上，直接误判失败。
+        int p = 0;
+        int startIdx = -1;
+        int endIdx = -1;
+        int n = Math.min(textEnd, plainText.length());
+        for (int t = 0; t < n; t++) {
+            char tc = plainText.charAt(t);
+            if (Character.isWhitespace(tc)) continue;
+            while (p < plain.length() && plain.charAt(p) != tc) {
+                if (!Character.isWhitespace(plain.charAt(p))
+                        && plain.charAt(p) != '\u00a0') {
+                    // 两边都是实字符却不相等：对齐失败，返回失败让调用方降级
+                    return null;
+                }
+                p++;
+            }
+            if (p >= plain.length()) return null;
+            if (t >= textStart) {
+                if (startIdx < 0) startIdx = runeIdx[p];
+                endIdx = runeEnd[p];
+            }
+            p++;
+        }
+        if (startIdx < 0 || endIdx <= startIdx) return null;
+        return new int[]{startIdx, endIdx};
+    }
+
+    private static final String B64C =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    /**
+     * 标准 Base64（纯 Java，JVM 回归可直接跑；android.util.Base64 在测试桩上会炸）。
+     * addBookmark 的 markText 走 UTF-8 字节的 Base64，这是协议要求。
+     */
+    public static String b64(String s) {
+        byte[] b;
+        try {
+            b = s.getBytes("UTF-8");
+        } catch (Exception e) {
+            b = s.getBytes();
+        }
+        StringBuilder sb = new StringBuilder((b.length + 2) / 3 * 4);
+        for (int i = 0; i < b.length; i += 3) {
+            int v = (b[i] & 0xFF) << 16;
+            int pad = 0;
+            if (i + 1 < b.length) v |= (b[i + 1] & 0xFF) << 8;
+            else pad++;
+            if (i + 2 < b.length) v |= b[i + 2] & 0xFF;
+            else pad++;
+            sb.append(B64C.charAt((v >> 18) & 63)).append(B64C.charAt((v >> 12) & 63));
+            sb.append(pad > 1 ? '=' : B64C.charAt((v >> 6) & 63));
+            sb.append(pad > 0 ? '=' : B64C.charAt(v & 63));
+        }
+        return sb.toString();
+    }
+
+    private static char decodeEntity(String ent) {        if (ent == null || ent.length() == 0) return 0;
+        if (ent.charAt(0) == '#') {
+            try {
+                int cp = ent.length() > 1 && (ent.charAt(1) == 'x' || ent.charAt(1) == 'X')
+                        ? Integer.parseInt(ent.substring(2), 16)
+                        : Integer.parseInt(ent.substring(1));
+                return cp > 0 && cp <= 0xFFFF ? (char) cp : 0;
+            } catch (Exception e) {
+                return 0;
+            }
+        }
+        switch (ent) {
+            case "nbsp": return ' ';
+            case "ldquo": return '\u201c';
+            case "rdquo": return '\u201d';
+            case "hellip": return '\u2026';
+            case "mdash": return '\u2014';
+            case "amp": return '&';
+            case "lt": return '<';
+            case "gt": return '>';
+            case "quot": return '"';
+            case "apos": return '\'';
+            default: return 0;
+        }
+    }
+
     /** 数字实体（&#10; / &#x4e2d;）必须还原成字符，否则正文里会冒出「10」「4e2d」这种数字。 */
     private static String decodeNumeric(String s) {
         Matcher m = NUMERIC.matcher(s);

@@ -243,6 +243,64 @@ public final class Eink {
         return Api.reviewRows(body);
     }
 
+    /**
+     * 某一章的书友划线（只读）。返回的 range 是原始 HTML 字符索引（我们用不上），
+     * 但每条带 markText（划线原文），用它在我们正文里做文本匹配定位高亮。
+     * accessToken 过期自动续期重试一次。
+     */
+    public static java.util.List<java.util.Map<String, Object>> underlines(
+            Store store, Cred cred, String bookId, String chapterUid)
+            throws IOException {
+        String url = BASE + "/book/underlines?bookId=" + Protocol.encode(bookId)
+                + "&chapterUid=" + Protocol.encode(chapterUid);
+        Cred c = cred;
+        String body;
+        try {
+            body = call(url, "GET", null, c, store.compat());
+        } catch (IOException first) {
+            if (!isAuthError(first)) throw first;
+            c = refresh(c, store.compat());
+            save(store, c);
+            body = call(url, "GET", null, c, store.compat());
+        }
+        return parseUnderlines(body);
+    }
+
+    /**
+     * 解析 underlines 返回体，兼容顶层/嵌套 data 两种结构。纯函数，SelfTest 直接跑。
+     * 每行保留 markText / range / 想法数（有 thoughts 字段就读，没有由调用方按想法列表聚合）。
+     */
+    static java.util.List<java.util.Map<String, Object>> parseUnderlines(String body) {
+        java.util.List<java.util.Map<String, Object>> out =
+                new java.util.ArrayList<java.util.Map<String, Object>>();
+        if (body == null || body.length() == 0) return out;
+        Object root;
+        try {
+            root = Json.parse(body);
+        } catch (Exception e) {
+            return out;
+        }
+        Object data = root;
+        Object nested = Json.map(root, "data");
+        if (((java.util.Map<?, ?>) nested).size() > 0
+                && Json.list(nested, "underlines").size() > 0) data = nested;
+        java.util.List<Object> rows = Json.list(data, "underlines");
+        for (Object o : rows) {
+            java.util.Map<String, Object> m = Json.asMap(o);
+            if (m.isEmpty()) continue;
+            String mark = Protocol.htmlToText(Json.str(m, "markText", "mark", "text"));
+            if (mark.length() == 0) continue;
+            java.util.Map<String, Object> row = new java.util.LinkedHashMap<String, Object>();
+            row.put("markText", mark);
+            row.put("range", Json.str(m, "range"));
+            row.put("time", Long.valueOf(
+                    m.get("createTime") instanceof Number ? ((Number) m.get("createTime")).longValue()
+                            : Json.longNum(m, "createTime")));
+            out.add(row);
+        }
+        return out;
+    }
+
     // ---------------- 阅读进度 ----------------
 
     /** E-Ink 侧的单书精确进度（GET /book/getProgress）。 */

@@ -138,6 +138,16 @@ public final class Store {
         sp.edit().putBoolean("keepAwake", v).commit();
     }
 
+    /** 自动翻页间隔（秒），10–120，默认 30。 */
+    public int autoFlipSec() {
+        int v = sp.getInt("autoFlipSec", 30);
+        return Math.max(10, Math.min(120, v));
+    }
+
+    public void setAutoFlipSec(int v) {
+        sp.edit().putInt("autoFlipSec", Math.max(10, Math.min(120, v))).commit();
+    }
+
     /** 每本书上次读到的位置，存成 "章节下标|章内偏移|写入毫秒"。 */
     public void setLastPos(String bookId, int index, int offset) {
         sp.edit().putString("lp_" + bookId, index + "|" + offset + "|" + System.currentTimeMillis())
@@ -320,6 +330,22 @@ public final class Store {
         return n;
     }
 
+    // ---------------- 本地划线 ----------------
+
+    /** 每本书的本地划线，Highlights.encode 出来的 JSON 数组（不进云端）。 */
+    public String highlights(String bookId) {
+        return get("hl_" + bookId);
+    }
+
+    public void setHighlights(String bookId, String json) {
+        put("hl_" + bookId, json);
+    }
+
+    /** 全书划线总数，「我」页统计和笔记面板用。 */
+    public int highlightCount(String bookId) {
+        return Highlights.decode(get("hl_" + bookId)).size();
+    }
+
     /** 每本书的累计阅读秒数，来自书架同步里的 bookProgress；没同步到过就是 -1。 */
     public int readTime(String bookId) {
         return sp.getInt("rt_" + bookId, -1);
@@ -443,6 +469,15 @@ public final class Store {
                 java.util.List<Bookmarks.Item> merged = Bookmarks.merge(
                         Bookmarks.decode(sp.getString(k, "")), Bookmarks.decode(v));
                 String enc = Bookmarks.encode(merged);
+                if (!enc.equals(sp.getString(k, ""))) { ed.putString(k, enc); n++; }
+            } else if (k.startsWith("hl_")) {
+                // 划线合并：本地加导入，同区间去重（导入的那条带的时间新就替换）
+                java.util.List<Highlights.Item> merged =
+                        Highlights.decode(sp.getString(k, ""));
+                for (Highlights.Item one : Highlights.decode(v)) {
+                    merged = Highlights.add(merged, one);
+                }
+                String enc = Highlights.encode(merged);
                 if (!enc.equals(sp.getString(k, ""))) { ed.putString(k, enc); n++; }
             } else if (k.equals("paraGapN")) {
                 // 新键老设备上可能没有本地值，不能落成字符串

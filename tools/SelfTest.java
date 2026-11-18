@@ -37,6 +37,10 @@ public class SelfTest {
         testSync();
         testEinkProgress();
         testReadingStats();
+        testHighlights();
+        testUnderlines();
+        testHtmlRange();
+        testBase64AndJsonWrite();
         System.out.println("---- " + passed + " passed, " + failed + " failed");
         if (failed > 0) System.exit(1);
     }
@@ -998,6 +1002,134 @@ public class SelfTest {
         inc.put("einkRead", "100");
         s2.mergeImportedPrefs(inc);
         eq("累计时长不倒退", s2.einkReadTime(), 1234);
+    }
+
+    static void testHighlights() {
+        java.util.List<com.modu.wereadlite.Highlights.Item> items =
+                new java.util.ArrayList<com.modu.wereadlite.Highlights.Item>();
+        items = com.modu.wereadlite.Highlights.add(items,
+                new com.modu.wereadlite.Highlights.Item("3", 1, 100, 120, "一百二十字的摘录", 1000L));
+        items = com.modu.wereadlite.Highlights.add(items,
+                new com.modu.wereadlite.Highlights.Item("3", 1, 40, 50, "第二段", 2000L));
+        // 同区间重复添加只更新时间并保留同步状态
+        com.modu.wereadlite.Highlights.Item dup =
+                new com.modu.wereadlite.Highlights.Item("3", 1, 40, 50, "第二段", 3000L);
+        dup.rid = "rid1";
+        items = com.modu.wereadlite.Highlights.add(items, dup);
+        eq("划线按偏移排序", items.get(0).start, 40);
+        eq("划线去重计数", items.size(), 2);
+        eq("划线时间被更新", items.get(0).at, 3000L);
+
+        String enc = com.modu.wereadlite.Highlights.encode(items);
+        java.util.List<com.modu.wereadlite.Highlights.Item> back =
+                com.modu.wereadlite.Highlights.decode(enc);
+        eq("划线编码往返", back.size(), 2);
+        eq("划线往返 rid", back.get(0).rid, "rid1");
+        eq("划线往返区间", back.get(0).start + "," + back.get(0).end, "40,50");
+
+        // rid 已同步的条目再次 add 空 rid 时不丢同步状态
+        com.modu.wereadlite.Highlights.Item again =
+                new com.modu.wereadlite.Highlights.Item("3", 1, 40, 50, "第二段", 4000L);
+        items = com.modu.wereadlite.Highlights.add(items, again);
+        eq("重复添加保留 rid", items.get(0).rid, "rid1");
+
+        eq("命中查找", com.modu.wereadlite.Highlights.at(items, 1, 45).start, 40);
+        yes("区间外未命中", com.modu.wereadlite.Highlights.at(items, 1, 60) == null);
+        yes("remove 删除", com.modu.wereadlite.Highlights.remove(items, "3", 40, 50));
+        eq("删除后计数", items.size(), 1);
+        eq("章过滤", com.modu.wereadlite.Highlights.ofChapter(items, 2).size(), 0);
+
+        // Store 层：hl_ 前缀 + autoFlipSec 夹逼
+        FakePrefs p = new FakePrefs();
+        com.modu.wereadlite.Store s = new com.modu.wereadlite.Store(p);
+        s.setHighlights("b1", enc);
+        eq("store 划线计数", s.highlightCount("b1"), 2);
+        s.setAutoFlipSec(999);
+        eq("autoFlipSec 夹到 120", s.autoFlipSec(), 120);
+        s.setAutoFlipSec(1);
+        eq("autoFlipSec 夹到 10", s.autoFlipSec(), 10);
+        yes("backup want hl_", com.modu.wereadlite.Backup.wantedPref("hl_b1"));
+
+        // 导入合并：划线按区间去重
+        FakePrefs p2 = new FakePrefs();
+        com.modu.wereadlite.Store s2 = new com.modu.wereadlite.Store(p2);
+        java.util.Map<String, String> inc = new java.util.LinkedHashMap<String, String>();
+        inc.put("hl_b1", enc);
+        s2.mergeImportedPrefs(inc);
+        eq("划线导入合并", s2.highlightCount("b1"), 2);
+    }
+
+    static void testUnderlines() {
+        String body = "{\"errCode\":0,\"data\":{\"underlines\":["
+                + "{\"range\":\"383-415\",\"markText\":\"<p>这一章写江户街市</p>\",\"createTime\":1765000000},"
+                + "{\"range\":\"100-120\",\"markText\":\"伦敦雨\",\"createTime\":\"1765000099\"}"
+                + "]}}";
+        java.util.List<java.util.Map<String, Object>> rows =
+                com.modu.wereadlite.Eink.parseUnderlines(body);
+        eq("underlines 顶层解析", rows.size(), 2);
+        eq("markText 去标签", String.valueOf(rows.get(0).get("markText")), "这一章写江户街市");
+        eq("range 保留", String.valueOf(rows.get(0).get("range")), "383-415");
+        eq("时间字符串转 long", Long.parseLong(String.valueOf(rows.get(1).get("time"))), 1765000099L);
+
+        // 顶层无 data 套壳
+        String flat = "{\"underlines\":[{\"range\":\"1-2\",\"markText\":\"ab\"}]}";
+        eq("underlines 扁平结构", com.modu.wereadlite.Eink.parseUnderlines(flat).size(), 1);
+        // 空/坏 body
+        eq("underlines 空 body", com.modu.wereadlite.Eink.parseUnderlines("").size(), 0);
+        eq("underlines 坏 JSON", com.modu.wereadlite.Eink.parseUnderlines("{oops").size(), 0);
+    }
+
+    static void testHtmlRange() {
+        // HTML 带标签与实体，正文是 htmlToText 的输出
+        String html = "<html><body><p>这一章写江户街市的光影</p>"
+                + "<p>第二段&nbsp;同样留&nbsp;在</p><p>第三段“雨”</p></body></html>";
+        String text = com.modu.wereadlite.Protocol.htmlToText(html);
+        eq("htmlToText 段落数", text.split("\n").length, 3);
+        // 全文对齐：第一个词的 HTML 起点（<html><body><p> 共 15 个字符）
+        int[] r = com.modu.wereadlite.Protocol.htmlRange(html, text, 0, 5);
+        eq("起点落在正文区（跳过 <html><body><p>）", r == null ? -1 : r[0], 15);
+        // 「江户街市」
+        int at = text.indexOf("江户街市");
+        r = com.modu.wereadlite.Protocol.htmlRange(html, text, at, at + 4);
+        yes("中段映射成功", r != null && r[1] > r[0]);
+        eq("中段映射切回原文", r == null ? "" : html.substring(r[0], r[1]), "江户街市");
+        // 跨段选择（含 \n）
+        int s = text.indexOf("第二段");
+        int e = text.indexOf("第三段") + 3;
+        r = com.modu.wereadlite.Protocol.htmlRange(html, text, s, e);
+        yes("跨段选择映射成功", r != null && r[1] > r[0]);
+        // 实体（&nbsp; → 空格）在正文中
+        at = text.indexOf("同样留 在");
+        yes("实体解码后正文存在", at > 0);
+        // BOM 前缀被剥掉（与首个用例比较，不用被覆盖的 r）
+        String bom = "\ufeff" + html;
+        int[] first = com.modu.wereadlite.Protocol.htmlRange(html, text, 0, 5);
+        int[] r2 = com.modu.wereadlite.Protocol.htmlRange(bom, text, 0, 5);
+        eq("BOM 不影响起点", r2 != null && first != null ? r2[0] - first[0] : -1, 0);
+        // 对齐不可能时失败降级
+        yes("不匹配返回 null",
+                com.modu.wereadlite.Protocol.htmlRange("<p>完全不同</p>", text, 0, 5) == null);
+        yes("空 HTML 返回 null", com.modu.wereadlite.Protocol.htmlRange("", text, 0, 5) == null);
+    }
+
+    static void testBase64AndJsonWrite() {
+        eq("b64 中文", com.modu.wereadlite.Protocol.b64("微读"), "5b6u6K+7");
+        eq("b64 英文+中文", com.modu.wereadlite.Protocol.b64("Hello, 世界!"), "SGVsbG8sIOS4lueVjCE=");
+        eq("b64 空", com.modu.wereadlite.Protocol.b64(""), "");
+        eq("b64 纯 ASCII", com.modu.wereadlite.Protocol.b64("ab"), "YWI=");
+
+        java.util.Map<String, Object> m = new java.util.LinkedHashMap<String, Object>();
+        m.put("bookId", "b1");
+        m.put("chapterIdx", Integer.valueOf(3));
+        m.put("type", Integer.valueOf(1));
+        m.put("markText", "微\"读\"\n");
+        String j = com.modu.wereadlite.Json.write(m);
+        yes("Json.write 含转义", j.contains("微\\\"读\\\"\\n"));
+        yes("Json.write 数字不加引号", j.contains("\"chapterIdx\":3"));
+        // 往返解析
+        java.util.Map<String, Object> back =
+                com.modu.wereadlite.Json.asMap(com.modu.wereadlite.Json.parse(j));
+        eq("Json.write 往返", com.modu.wereadlite.Json.str(back, "markText"), "微\"读\"\n");
     }
 
     static void deleteTree(File f) {

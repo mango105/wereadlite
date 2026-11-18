@@ -411,7 +411,18 @@ public final class Api {
 
     /** 返回章节纯文本（已去标签）。 */
     public String chapterText(String bookId, String chapterUid, Context ctx) throws IOException {
+        return chapter(bookId, chapterUid, ctx).text;
+    }
+
+    /** 章节正文 + 原始 HTML（写划线要拿 HTML 算 range）。 */
+    public static final class ChapterData {
+        public String text = "";
+        public String html = "";
+    }
+
+    public ChapterData chapter(String bookId, String chapterUid, Context ctx) throws IOException {
         String a = shard("/web/book/chapter/e_0", bookId, chapterUid, ctx.psvts, false);
+        String[] parts;
         if (a.trim().startsWith("{") && a.contains("\"bookId\"")) {
             // 网文类：改走 t_0 / t_1
             String t0 = shard("/web/book/chapter/t_0", bookId, chapterUid, ctx.psvts, false);
@@ -421,11 +432,99 @@ public final class Api {
             } catch (IOException e) {
                 Log.w(TAG, "t_1 empty: " + e.getMessage());
             }
-            return Protocol.htmlToText(Protocol.decodeParts(new String[]{t0, t1}));
+            parts = new String[]{t0, t1};
+        } else {
+            String b = shard("/web/book/chapter/e_1", bookId, chapterUid, ctx.psvts, false);
+            String c = shard("/web/book/chapter/e_3", bookId, chapterUid, ctx.psvts, false);
+            parts = new String[]{a, b, c};
         }
-        String b = shard("/web/book/chapter/e_1", bookId, chapterUid, ctx.psvts, false);
-        String c = shard("/web/book/chapter/e_3", bookId, chapterUid, ctx.psvts, false);
-        return Protocol.htmlToText(Protocol.decodeParts(new String[]{a, b, c}));
+        ChapterData d = new ChapterData();
+        d.html = Protocol.decodeParts(parts);
+        d.text = Protocol.htmlToText(d.html);
+        return d;
+    }
+
+    // ---------- 划线 / 想法（云端写，协议同 MiuRead 开源实现） ----------
+
+    /** 书籍版本号，addBookmark / addReview 必带；取不到返回 0（部分书仍能写成功）。 */
+    public int bookVersion(String bookId) throws IOException {
+        Resp r = get(Protocol.BASE + "/web/book/info?bookId=" + Protocol.encode(bookId),
+                Protocol.BASE + "/web/shelf", 15000);
+        if (r.code != 200) throw new IOException("HTTP " + r.code);
+        return (int) pickLong(Json.asMap(Json.parse(r.body)), "version", "bookVersion");
+    }
+
+    /**
+     * 上传一条划线。markText 走 Base64（协议要求），range 为章节 HTML 字符索引。
+     * 成功返回服务端 bookmarkId（删除时要用），失败抛 IOException。
+     */
+    public String addBookmark(String bookId, String chapterUid, int chapterIdx,
+                              int version, String range, String markText)
+            throws IOException {
+        Map<String, Object> m = new LinkedHashMap<String, Object>();
+        m.put("bookId", bookId);
+        m.put("chapterUid", chapterUid);
+        m.put("chapterIdx", Integer.valueOf(chapterIdx));
+        m.put("bookVersion", Integer.valueOf(version));
+        m.put("type", Integer.valueOf(1));
+        m.put("style", Integer.valueOf(1));
+        m.put("colorStyle", Integer.valueOf(0));
+        m.put("range", range);
+        m.put("markText", Protocol.b64(markText));
+        Resp r = post(Protocol.BASE + "/web/book/addBookmark", Json.write(m),
+                Protocol.readerUrl(bookId, chapterUid), 20000);
+        Object root = Json.parse(r.body);
+        if (r.code != 200 || Json.num(root, "errcode") != 0 && Json.num(root, "succ") == 0
+                && Json.str(root, "bookmarkId").length() == 0) {
+            throw new IOException("addBookmark 被拒绝：" + trim(r.body));
+        }
+        return Json.str(root, "bookmarkId", "bookmarkID");
+    }
+
+    /** 删除一条云端划线。 */
+    public void removeBookmark(String bookmarkId, String bookId, String chapterUid)
+            throws IOException {
+        Map<String, Object> m = new LinkedHashMap<String, Object>();
+        m.put("bookmarkId", bookmarkId);
+        Resp r = post(Protocol.BASE + "/web/book/removeBookmark", Json.write(m),
+                Protocol.readerUrl(bookId, chapterUid), 20000);
+        if (r.code != 200) throw new IOException("removeBookmark HTTP " + r.code);
+    }
+
+    /**
+     * 上传一条想法（默认私密 isPrivate=1，不会打扰书友，之后可在官方 App 改公开）。
+     * 返回服务端 reviewId。
+     */
+    public String addReview(String bookId, String chapterUid, int chapterIdx,
+                            int version, String range, String abstractText, String content)
+            throws IOException {
+        Map<String, Object> m = new LinkedHashMap<String, Object>();
+        m.put("type", Integer.valueOf(1));
+        m.put("bookId", bookId);
+        m.put("chapterUid", chapterUid);
+        m.put("chapterIdx", Integer.valueOf(chapterIdx));
+        m.put("bookVersion", Integer.valueOf(version));
+        m.put("range", range);
+        m.put("abstract", abstractText);
+        m.put("content", content);
+        m.put("isPrivate", Integer.valueOf(1));
+        Resp r = post(Protocol.BASE + "/web/review/add", Json.write(m),
+                Protocol.readerUrl(bookId, chapterUid), 20000);
+        Object root = Json.parse(r.body);
+        if (r.code != 200 || Json.str(root, "reviewId", "reviewID").length() == 0) {
+            throw new IOException("addReview 被拒绝：" + trim(r.body));
+        }
+        return Json.str(root, "reviewId", "reviewID");
+    }
+
+    /** 网页会话直接拉某章书友划线（含 markText 原文），E-Ink 通道之外的第二条读通道。 */
+    public List<Map<String, Object>> webUnderlines(String bookId, String chapterUid)
+            throws IOException {
+        Resp r = get(Protocol.BASE + "/web/book/underlines?bookId=" + Protocol.encode(bookId)
+                        + "&chapterUid=" + Protocol.encode(chapterUid),
+                Protocol.readerUrl(bookId, chapterUid), 15000);
+        if (r.code != 200) throw new IOException("HTTP " + r.code);
+        return Eink.parseUnderlines(r.body);
     }
 
     // ---------- 进度上报 ----------
@@ -578,6 +677,37 @@ public final class Api {
             row.put("author", name);
             row.put("like", Integer.valueOf(pick(m, "likeCount", "likes")));
             row.put("comment", Integer.valueOf(pick(m, "commentCount", "comments")));
+            row.put("time", Long.valueOf(pickLong(m, "createTime", "time")));
+            row.put("reviewId", Json.str(m, "reviewId", "review_id", "id"));
+            out.add(row);
+        }
+        return out;
+    }
+
+    /**
+     * 单条想法的评论列表（含点赞的人）。走网页接口 /web/review/single，
+     * 只读；没有登录态或接口不给数据时调用方显示空态即可。
+     */
+    public List<Map<String, Object>> reviewDetail(String reviewId) throws IOException {
+        String url = Protocol.BASE + "/web/review/single?reviewId=" + Protocol.encode(reviewId)
+                + "&commentsCount=20&commentsDirection=0&likesCount=0&listType=0&maxIdx=0&count=20&synckey=0";
+        Resp r = get(url, "https://weread.qq.com/", 15000);
+        if (r.code != 200) throw new IOException("HTTP " + r.code);
+        Object root = Json.parse(r.body);
+        Map<String, Object> review = Json.map(root, "review");
+        List<Map<String, Object>> out = new ArrayList<Map<String, Object>>();
+        List<Object> comments = Json.list(root, "comments");
+        if (comments.isEmpty()) comments = Json.list(review, "comments");
+        for (Object o : comments) {
+            Map<String, Object> m = Json.asMap(o);
+            if (m.isEmpty()) continue;
+            Map<String, Object> inner = Json.map(m, "comment");
+            if (!inner.isEmpty()) m = inner;
+            String c = Protocol.htmlToText(Json.str(m, "content", "text"));
+            if (c.length() == 0) continue;
+            Map<String, Object> row = new LinkedHashMap<String, Object>();
+            row.put("content", c);
+            row.put("author", Json.str(Json.map(m, "author"), "name", "nick"));
             row.put("time", Long.valueOf(pickLong(m, "createTime", "time")));
             out.add(row);
         }

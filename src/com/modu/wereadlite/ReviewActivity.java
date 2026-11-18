@@ -239,7 +239,7 @@ public class ReviewActivity extends Activity {
         return card;
     }
 
-    private View thoughtCard(Map<String, Object> row) {
+    private View thoughtCard(final Map<String, Object> row) {
         LinearLayout card = card();
 
         String name = BookRow.str(row.get("author"));
@@ -281,9 +281,79 @@ public class ReviewActivity extends Activity {
         foot.addView(counter(NavIcon.HEART, like));
         View spacer = new View(this);
         foot.addView(spacer, new LinearLayout.LayoutParams(0, 1, 1f));
-        foot.addView(counter(NavIcon.CHAT, comment));
+        final String reviewId = BookRow.str(row.get("reviewId"));
+        if (comment > 0 && reviewId.length() > 0) {
+            TextView more = Ui.text(this, "看评论 ›", 11.5f, Ui.SUB);
+            more.setPadding(dp(10), 0, 0, 0);
+            more.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    showComments(reviewId, row);
+                }
+            });
+            foot.addView(more);
+        }
+        View ctail = counter(NavIcon.CHAT, comment);
+        foot.addView(ctail);
         card.addView(foot);
         return card;
+    }
+
+    /** 点「看评论」：拉 /web/review/single 的评论列表弹窗展示。 */
+    private void showComments(final String reviewId, final Map<String, Object> row) {
+        final android.app.AlertDialog dlg = new android.app.AlertDialog.Builder(this)
+                .setTitle("评论")
+                .setView(loadingView())
+                .setPositiveButton("关闭", null)
+                .show();
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                List<Map<String, Object>> comments;
+                try {
+                    comments = api.reviewDetail(reviewId);
+                } catch (Exception e) {
+                    comments = new ArrayList<Map<String, Object>>();
+                }
+                final List<Map<String, Object>> found = comments;
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (isFinishing() || !dlg.isShowing()) return;
+                        android.widget.ScrollView sc = new android.widget.ScrollView(
+                                ReviewActivity.this);
+                        LinearLayout box = new LinearLayout(ReviewActivity.this);
+                        box.setOrientation(LinearLayout.VERTICAL);
+                        box.setPadding(dp(6), dp(4), dp(6), dp(4));
+                        if (found.isEmpty()) {
+                            box.addView(Ui.text(ReviewActivity.this,
+                                    "评论拉取失败或没有权限", 12f, Ui.LIGHT));
+                        }
+                        for (Map<String, Object> c : found) {
+                            LinearLayout one = new LinearLayout(ReviewActivity.this);
+                            one.setOrientation(LinearLayout.VERTICAL);
+                            one.setPadding(0, dp(8), 0, dp(8));
+                            TextView who = Ui.text(ReviewActivity.this,
+                                    BookRow.str(c.get("author")), 11.5f, Ui.LIGHT);
+                            one.addView(who);
+                            TextView body = Ui.text(ReviewActivity.this,
+                                    BookRow.str(c.get("content")), 13f, Ui.INK);
+                            body.setPadding(0, dp(3), 0, 0);
+                            one.addView(body);
+                            box.addView(one);
+                        }
+                        sc.addView(box);
+                        dlg.setView(sc);
+                    }
+                });
+            }
+        }).start();
+    }
+
+    private View loadingView() {
+        TextView t = Ui.text(this, "正在加载评论…", 12.5f, Ui.LIGHT);
+        t.setPadding(dp(10), dp(12), dp(10), dp(12));
+        return t;
     }
 
     private View counter(int kind, int value) {

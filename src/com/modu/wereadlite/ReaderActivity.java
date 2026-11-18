@@ -35,7 +35,8 @@ import java.util.List;
 import java.util.Map;
 
 /** 阅读页：点中间出工具条，目录抽屉 + 显示面板（字号/边距/行距），音量键翻页。 */
-public class ReaderActivity extends Activity implements PageView.Callback {
+public class ReaderActivity extends Activity implements PageView.Callback,
+        PageView.SelectListener {
 
     private Store store;
     private Api api;
@@ -61,13 +62,15 @@ public class ReaderActivity extends Activity implements PageView.Callback {
     private TextView progressChapter;
     private TextView progressHint;
     private TextView autoFlipBtn;
+    private SeekRow intervalSeek;
+    private TextView intervalValue;
     private boolean autoFlipping;
     private final Runnable autoFlipTick = new Runnable() {
         @Override
         public void run() {
             if (!autoFlipping) return;
             onNextChapter();
-            ui.postDelayed(this, 12000);   // 每 12 秒翻一页，留足阅读时间
+            ui.postDelayed(this, store.autoFlipSec() * 1000L);
         }
     };
     private View tocPanel;
@@ -119,6 +122,25 @@ public class ReaderActivity extends Activity implements PageView.Callback {
     private int loadToken;
     private boolean demo;
     private final Handler ui = new Handler();
+
+    // ---------------- 划线与想法 ----------------
+    /** 本章原始 HTML（写划线算 range 用，随章节切换更新；本地书/演示书为空）。 */
+    private volatile String chapterHtml = "";
+    /** 本章书友划线（webUnderlines，markText 原文）。 */
+    private final List<Map<String, Object>> cloudMarks = new ArrayList<Map<String, Object>>();
+    /** markText -> 书友想法数，点划线弹想法列表用。 */
+    private final java.util.HashMap<String, Integer> thoughtCount =
+            new java.util.HashMap<String, Integer>();
+    /** 本地划线（全书），与 Store.hl_ 同源。 */
+    private final List<Highlights.Item> localMarks = new ArrayList<Highlights.Item>();
+    /** 长按选择后的浮动操作条。 */
+    private android.widget.PopupWindow selMenu;
+    /** 选区起点（章内偏移），菜单按钮共用。 */
+    private int selAnchorStart;
+    private int selAnchorEnd;
+    /** 书籍版本号（写划线/想法必带），一次拉取整本复用。 */
+    private volatile int bookVer;
+    private volatile boolean verFetched;
 
     private final Runnable ticker = new Runnable() {
         @Override
@@ -173,6 +195,7 @@ public class ReaderActivity extends Activity implements PageView.Callback {
 
         pageView = new PageView(this);
         pageView.setCallback(this);
+        pageView.setSelectListener(this);
         pageView.setFooter(new PageView.Footer() {
             @Override
             public String caption() {
@@ -451,7 +474,43 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         panel.addView(progressHint, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        // 自动翻页按钮，对齐官方「开启自动翻页」，长按可停止
+        // 翻页间隔：10–120 秒，默认 30，对齐官方「翻页间隔 30秒」滑杆
+        LinearLayout intervalRow = new LinearLayout(this);
+        intervalRow.setOrientation(LinearLayout.HORIZONTAL);
+        intervalRow.setGravity(Gravity.CENTER_VERTICAL);
+        intervalRow.setPadding(dp(18), dp(6), dp(18), 0);
+        TextView il = Ui.text(this, "翻页间隔", 13.5f, Ui.SUB);
+        intervalRow.addView(il, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        View ispace = new View(this);
+        intervalRow.addView(ispace, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        intervalSeek = new SeekRow(this);
+        intervalSeek.setRange(10, 120);
+        intervalSeek.setEdges("10", 8f, "120", 8f);
+        intervalSeek.setValue(store.autoFlipSec());
+        intervalValue = Ui.text(this, store.autoFlipSec() + " 秒", 13.5f, Ui.INK);
+        intervalSeek.setListener(new SeekRow.Listener() {
+            @Override
+            public void onValue(int value) {
+                setInterval(value);
+            }
+
+            @Override
+            public void onCommit(int value) {
+                setInterval(value);
+                store.setAutoFlipSec(value);
+            }
+        });
+        intervalRow.addView(intervalSeek, new LinearLayout.LayoutParams(
+                0, dp(44), 1f));
+        intervalRow.addView(intervalValue, new LinearLayout.LayoutParams(
+                dp(56), ViewGroup.LayoutParams.WRAP_CONTENT));
+        intervalValue.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+        panel.addView(intervalRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // 自动翻页按钮，对齐官方「开启自动翻页」
         autoFlipBtn = flatButton("开启自动翻页", 13.5f, Ui.INK);
         autoFlipBtn.setBackgroundDrawable(Ui.box(Color.WHITE, Ui.LINE, 1, dp(22)));
         LinearLayout.LayoutParams abp = new LinearLayout.LayoutParams(
@@ -492,12 +551,21 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         autoFlipping = !autoFlipping;
         if (autoFlipping) {
             autoFlipBtn.setText("停止自动翻页");
-            ui.postDelayed(autoFlipTick, 12000);
-            brief("已开启自动翻页（每 12 秒）");
+            ui.removeCallbacks(autoFlipTick);
+            ui.postDelayed(autoFlipTick, store.autoFlipSec() * 1000L);
+            brief("已开启自动翻页（每 " + store.autoFlipSec() + " 秒）");
         } else {
             ui.removeCallbacks(autoFlipTick);
             autoFlipBtn.setText("开启自动翻页");
             brief("已停止自动翻页");
+        }
+    }
+
+    private void setInterval(int sec) {
+        if (intervalValue != null) intervalValue.setText(sec + " 秒");
+        if (autoFlipping) {
+            ui.removeCallbacks(autoFlipTick);
+            ui.postDelayed(autoFlipTick, sec * 1000L);
         }
     }
 
@@ -637,7 +705,8 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         nt.setEllipsize(TextUtils.TruncateAt.END);
         info.addView(nt);
         int pct = overallProgress(pageView == null ? 0 : pageView.currentOffset());
-        TextView meta = Ui.text(this, "已读到 " + pct + "% · " + marks.size() + " 条书签", 11.5f, Ui.SUB);
+        TextView meta = Ui.text(this, "已读到 " + pct + "% · " + marks.size() + " 书签 · "
+                + store.highlightCount(bookId) + " 划线", 11.5f, Ui.SUB);
         meta.setPadding(0, dp(4), 0, 0);
         info.addView(meta);
         String spent = Ui.duration(store.readTime(bookId));
@@ -708,6 +777,63 @@ public class ReaderActivity extends Activity implements PageView.Callback {
             }
         }
 
+        // 我的划线
+        List<Highlights.Item> hls = synchronizedMarks();
+        notesContent.addView(noteSection("我的划线 · " + hls.size() + " 条"));
+        if (hls.isEmpty()) {
+            TextView empty = Ui.text(this, "还没有划线。阅读时长按正文选中文字即可划线。",
+                    12f, Ui.LIGHT);
+            empty.setPadding(dp(18), dp(6), dp(18), dp(8));
+            notesContent.addView(empty);
+        } else {
+            for (int i = 0; i < hls.size(); i++) {
+                final Highlights.Item it = hls.get(i);
+                LinearLayout row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                row.setGravity(Gravity.CENTER_VERTICAL);
+                row.setPadding(dp(18), dp(9), dp(12), dp(9));
+                row.setBackgroundDrawable(Ui.box(Color.WHITE, Ui.LINE, 1, dp(6)));
+
+                LinearLayout texts = new LinearLayout(this);
+                texts.setOrientation(LinearLayout.VERTICAL);
+                TextView excerpt = Ui.text(this,
+                        it.excerpt.length() > 0 ? it.excerpt : "（无摘录）", 13, Ui.INK);
+                excerpt.setMaxLines(2);
+                excerpt.setEllipsize(TextUtils.TruncateAt.END);
+                texts.addView(excerpt);
+                String chapter = chapterTitleOf(it.idx);
+                String state = it.rid.length() > 0 ? "已同步" : "仅本机";
+                TextView sub = Ui.text(this,
+                        chapter + " · " + state + (it.range.length() > 0 ? "" : ""), 10.5f, Ui.LIGHT);
+                sub.setPadding(0, dp(3), 0, 0);
+                texts.addView(sub);
+                row.addView(texts, new LinearLayout.LayoutParams(0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+                TextView del = Ui.text(this, "×", 20, Ui.LIGHT);
+                del.setPadding(dp(12), dp(4), dp(4), dp(4));
+                del.setOnClickListener(new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        deleteMark(it);
+                        bindNotes();
+                    }
+                });
+                row.addView(del);
+                row.setOnClickListener(new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        notesPanel.setVisibility(View.GONE);
+                        loadChapter(it.idx, false, it.start);
+                    }
+                });
+                LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                rlp.setMargins(dp(16), 0, dp(16), dp(6));
+                notesContent.addView(row, rlp);
+            }
+        }
+
         // 书友想法
         notesContent.addView(noteSection("书友想法"));
         LinearLayout reviewCard = new LinearLayout(this);
@@ -730,10 +856,18 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         rcp.setMargins(dp(16), 0, dp(16), dp(16));
         notesContent.addView(reviewCard, rcp);
 
-        TextView note = Ui.text(this, "自己写想法 / 划线需要微信读书私有写入接口，暂不支持。",
+        TextView note = Ui.text(this, "划线同步到微信读书云端（手机 App 可见）；想法发布后默认仅自己可见。",
                 10.5f, Ui.LIGHT);
         note.setPadding(dp(18), 0, dp(18), dp(12));
         notesContent.addView(note);
+    }
+
+    private String chapterTitleOf(int idx) {
+        if (idx >= 0 && idx < chapters.size()) {
+            String t = String.valueOf(chapters.get(idx).get("title"));
+            if (t.length() > 0) return t;
+        }
+        return "第 " + (idx + 1) + " 章";
     }
 
     /** 笔记页：我的书签 + 书友想法。做成覆盖层，和官方「笔记」页一致。 */
@@ -1917,7 +2051,7 @@ public class ReaderActivity extends Activity implements PageView.Callback {
         progressPercent.setText(pct + "%");
         String spent = Ui.duration(store.readTime(bookId));
         progressPages.setText(spent.length() == 0 ? "0 分钟" : spent);
-        progressChapter.setText(String.valueOf(store.bookmarkCount()));
+        progressChapter.setText(String.valueOf(marks.size() + store.highlightCount(bookId)));
         progressRow.setValue(len == 0 ? 0 : at * 100 / Math.max(1, len));
     }
 
@@ -2051,11 +2185,17 @@ public class ReaderActivity extends Activity implements PageView.Callback {
                                 if (token != loadToken) return;
                                 ctx = null;
                                 currentText = body;
+                                chapterHtml = "";
+                                synchronized (localMarks) {
+                                    localMarks.clear();
+                                    localMarks.addAll(Highlights.decode(store.highlights(bookId)));
+                                }
                                 autoSkips = 0;
                                 hideOverlay();
                                 pageView.setText(body, startAtEnd, offset);
                                 store.setLastPos(bookId, chapterIndex, pageView.currentOffset());
                                 if (tocAdapter != null) tocAdapter.notifyDataSetChanged();
+                                loadCloudAnnotations(String.valueOf(chapter.get("uid")));
                             }
                         });
                     } catch (final Exception e) {
@@ -2085,13 +2225,14 @@ public class ReaderActivity extends Activity implements PageView.Callback {
                 try {
                     String uid = String.valueOf(chapter.get("uid"));
                     Api.Context c = api.context(bookId, uid, false);
-                    String text;
+                    Api.ChapterData cd;
                     try {
-                        text = api.chapterText(bookId, uid, c);
+                        cd = api.chapter(bookId, uid, c);
                     } catch (Exception first) {
                         c = api.context(bookId, uid, true);
-                        text = api.chapterText(bookId, uid, c);
+                        cd = api.chapter(bookId, uid, c);
                     }
+                    String text = cd.text;
                     if (text.trim().length() == 0) {
                         // 封面页/版权页只有图片，没有可排版的文字：直接略过
                         final int next = nextReadable(index + 1, 1);
@@ -2108,6 +2249,7 @@ public class ReaderActivity extends Activity implements PageView.Callback {
                         throw new Exception("本章为图片页，没有可显示的文字");
                     }
                     final String body = text;
+                    final String rawHtml = cd.html;
                     final Api.Context context = c;
                     ui.post(new Runnable() {
                         @Override
@@ -2115,11 +2257,17 @@ public class ReaderActivity extends Activity implements PageView.Callback {
                             if (token != loadToken) return;
                             ctx = context;
                             currentText = body;
+                            chapterHtml = rawHtml;
+                            synchronized (localMarks) {
+                                localMarks.clear();
+                                localMarks.addAll(Highlights.decode(store.highlights(bookId)));
+                            }
                             autoSkips = 0;
                             hideOverlay();
                             pageView.setText(body, startAtEnd, offset);
                             store.setLastPos(bookId, chapterIndex, pageView.currentOffset());
                             if (tocAdapter != null) tocAdapter.notifyDataSetChanged();
+                            loadCloudAnnotations(String.valueOf(chapter.get("uid")));
                             report();
                         }
                     });
@@ -2128,6 +2276,433 @@ public class ReaderActivity extends Activity implements PageView.Callback {
                 }
             }
         }).start();
+    }
+
+    // ---------------- 划线与想法 ----------------
+
+    @Override
+    public void onSelection(int start, int end) {
+        selAnchorStart = start;
+        selAnchorEnd = end;
+        showSelMenu();
+    }
+
+    @Override
+    public void onHighlightTap(int start, int end, int kind) {
+        if (start < 0) {   // 点了选区外，菜单随选区一起消失
+            dismissSelMenu();
+            return;
+        }
+        if (kind == PageView.HL_CLOUD) {
+            showThoughts(markTextAt(start, end));
+        } else {
+            showMarkActions(start, end);
+        }
+    }
+
+    private String markTextAt(int start, int end) {
+        int from = Math.max(0, start);
+        int to = Math.min(currentText.length(), end);
+        return from < to ? currentText.substring(from, to) : "";
+    }
+
+    /** 长按选择后的浮动操作条：划线 / 写想法 / 复制 / 查询，贴在选区上方。 */
+    private void showSelMenu() {
+        dismissSelMenu();
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setBackgroundDrawable(Ui.box(0xEE1F1F1F, 0x00000000, 0, dp(8)));
+        String[] labels = {"划线", "写想法", "复制", "查询"};
+        for (int i = 0; i < labels.length; i++) {
+            TextView b = Ui.text(this, labels[i], 14, Color.WHITE);
+            b.setGravity(Gravity.CENTER);
+            b.setPadding(dp(16), dp(10), dp(16), dp(10));
+            b.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    String l = ((TextView) v).getText().toString();
+                    dismissSelMenu();
+                    if (l.equals("划线")) createHighlight();
+                    else if (l.equals("写想法")) writeThought();
+                    else if (l.equals("复制")) copySelection();
+                    else if (l.equals("查询")) querySelection();
+                }
+            });
+            bar.addView(b);
+        }
+        selMenu = new android.widget.PopupWindow(bar,
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, true);
+        selMenu.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+        selMenu.setOutsideTouchable(true);
+        int top = pageView.selectionTop();
+        int y = top > dp(90) ? top - dp(52) : dp(60);
+        selMenu.showAtLocation(pageView, Gravity.NO_GRAVITY, dp(40), y);
+    }
+
+    private void dismissSelMenu() {
+        if (selMenu != null && selMenu.isShowing()) selMenu.dismiss();
+        selMenu = null;
+        pageView.clearSelection();
+    }
+
+    /** 划线：先落本地，range 能映射就推云端（addBookmark），映射失败只留本地。 */
+    private void createHighlight() {
+        final int s = selAnchorStart;
+        final int e = selAnchorEnd;
+        if (e <= s) return;
+        String chapterUid = String.valueOf(chapters.get(chapterIndex).get("uid"));
+        Highlights.Item it = new Highlights.Item(chapterUid, chapterIndex, s, e,
+                Highlights.excerptOf(currentText, s, e), System.currentTimeMillis());
+        synchronized (localMarks) {
+            Highlights.add(localMarks, it);
+            persistMarks();
+        }
+        applyHighlights();
+        brief("已划线");
+        final Highlights.Item item = it;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                uploadMark(item);
+            }
+        }).start();
+    }
+
+    /** 推云端：range 映射失败时静默跳过（仅本地），成功后回写 bookmarkId。 */
+    private void uploadMark(Highlights.Item item) {
+        if (chapterHtml.length() == 0 || item.rid.length() > 0) return;
+        try {
+            int[] rg = item.range.length() > 0 ? null
+                    : Protocol.htmlRange(chapterHtml, currentText, item.start, item.end);
+            if (rg == null && item.range.length() == 0) return;
+            String range = item.range.length() > 0 ? item.range
+                    : rg[0] + "-" + rg[1];
+            String rid = api.addBookmark(bookId, item.uid, chapterIndex, fetchVer(),
+                    range, markTextAt(item.start, item.end));
+            item.rid = rid;
+            item.range = range;
+            synchronized (localMarks) {
+                persistMarks();
+            }
+        } catch (Exception e) {
+            Trace.i("addBookmark failed: " + e);
+        }
+    }
+
+    /** 写想法：弹输入框，发布默认私密（isPrivate=1），走 /web/review/add。 */
+    private void writeThought() {
+        final String mark = markTextAt(selAnchorStart, selAnchorEnd);
+        pageView.clearSelection();
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(20), dp(16), dp(20), dp(8));
+        TextView quote = Ui.text(this, mark.length() > 0 ? "「" + mark + "」" : "整章想法",
+                12.5f, Ui.SUB);
+        quote.setPadding(0, 0, 0, dp(10));
+        box.addView(quote);
+        final EditText input = new EditText(this);
+        input.setHint("写下你的想法（发布后仅自己可见）");
+        input.setMinLines(3);
+        input.setGravity(Gravity.TOP);
+        box.addView(input, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        TextView tip = Ui.text(this, "想法同步到微信读书云端，官方 App 的「热门想法」不展示私密内容",
+                10.5f, Ui.LIGHT);
+        tip.setPadding(0, dp(8), 0, dp(4));
+        box.addView(tip);
+        new AlertDialog.Builder(this)
+                .setTitle("写想法")
+                .setView(box)
+                .setPositiveButton("发布", new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface d, int w) {
+                        final String content = input.getText().toString().trim();
+                        if (content.length() == 0) return;
+                        final String chapterUid =
+                                String.valueOf(chapters.get(chapterIndex).get("uid"));
+                        final int s = selAnchorStart;
+                        final int e = selAnchorEnd;
+                        new Thread(new Runnable() {
+                            @Override
+                            public void run() {
+                                try {
+                                    String range = "0-0";
+                                    int[] rg = Protocol.htmlRange(
+                                            chapterHtml, currentText, s, e);
+                                    if (rg != null) range = rg[0] + "-" + rg[1];
+                                    api.addReview(bookId, chapterUid, chapterIndex,
+                                            fetchVer(), range, mark, content);
+                                    ui.post(new Runnable() {
+                                        @Override
+                                        public void run() {
+                                            brief("想法已同步");
+                                        }
+                                    });
+                                } catch (final Exception ex) {
+                                    ui.post(new Runnable() {
+                                        @Override
+                                        public void run() {
+                                            brief("想法同步失败：" + ex.getMessage());
+                                        }
+                                    });
+                                }
+                            }
+                        }).start();
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void copySelection() {
+        String text = pageView.selectionText();
+        pageView.clearSelection();
+        if (text.length() == 0) return;
+        android.content.ClipboardManager cm =
+                (android.content.ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        cm.setPrimaryClip(android.content.ClipData.newPlainText("text", text));
+        brief("已复制");
+    }
+
+    /** 查询：把选词丢给百科（系统浏览器打开，不内置 WebView）。 */
+    private void querySelection() {
+        String word = pageView.selectionText().trim();
+        pageView.clearSelection();
+        if (word.length() == 0) return;
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, android.net.Uri.parse(
+                    "https://baike.baidu.com/item/" + java.net.URLEncoder.encode(word, "UTF-8"))));
+        } catch (Exception e) {
+            brief("没有可用的浏览器");
+        }
+    }
+
+    /** 点自己的划线：复制 / 删除（本地 + 云端）。 */
+    private void showMarkActions(final int s, final int e) {
+        final Highlights.Item it = Highlights.at(synchronizedMarks(), chapterIndex, s);
+        if (it == null) return;
+        String[] items = {"复制原文", "删除划线"};
+        new AlertDialog.Builder(this)
+                .setItems(items, new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface d, int w) {
+                        if (w == 0) {
+                            android.content.ClipboardManager cm =
+                                    (android.content.ClipboardManager) getSystemService(
+                                            Context.CLIPBOARD_SERVICE);
+                            cm.setPrimaryClip(android.content.ClipData.newPlainText(
+                                    "text", markTextAt(s, e)));
+                            brief("已复制");
+                        } else {
+                            deleteMark(it);
+                        }
+                    }
+                }).show();
+    }
+
+    private List<Highlights.Item> synchronizedMarks() {
+        synchronized (localMarks) {
+            return new ArrayList<Highlights.Item>(localMarks);
+        }
+    }
+
+    private void deleteMark(final Highlights.Item it) {
+        synchronized (localMarks) {
+            Highlights.remove(localMarks, it.uid, it.start, it.end);
+            persistMarks();
+        }
+        applyHighlights();
+        brief("已删除划线");
+        if (it.rid.length() > 0) {
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        api.removeBookmark(it.rid, bookId, it.uid);
+                    } catch (Exception e) {
+                        Trace.i("removeBookmark failed: " + e);
+                    }
+                }
+            }).start();
+        }
+    }
+
+    /** 点书友划线：弹该段的想法列表（含点赞数）。 */
+    private void showThoughts(final String mark) {
+        if (mark.length() == 0) return;
+        Integer n = thoughtCount.get(mark);
+        if (n == null || n.intValue() == 0) {
+            brief("这一段还没有书友想法");
+            return;
+        }
+        final List<Map<String, Object>> rows = new ArrayList<Map<String, Object>>();
+        for (Map<String, Object> r : cloudReviews()) {
+            String m = String.valueOf(r.get("mark"));
+            if (m.equals(mark)) rows.add(r);
+        }
+        if (rows.isEmpty()) {
+            brief("这一段还没有书友想法");
+            return;
+        }
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        ScrollView sc = new ScrollView(this);
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        for (Map<String, Object> r : rows) {
+            LinearLayout card = new LinearLayout(this);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setPadding(dp(16), dp(10), dp(16), dp(10));
+            TextView who = Ui.text(this, String.valueOf(r.get("author")), 12.5f, Ui.INK);
+            who.setTypeface(Typeface.DEFAULT_BOLD);
+            card.addView(who);
+            TextView body = Ui.text(this, String.valueOf(r.get("content")), 13.5f, Ui.SUB);
+            body.setPadding(0, dp(4), 0, dp(4));
+            card.addView(body);
+            TextView meta = Ui.text(this, "♥ " + r.get("like") + " · 💬 "
+                    + r.get("comment"), 11, Ui.LIGHT);
+            card.addView(meta);
+            list.addView(card, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        }
+        sc.addView(list);
+        box.addView(sc, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(360)));
+        new AlertDialog.Builder(this)
+                .setTitle("「" + ellipsis(mark, 18) + "」的书友想法")
+                .setView(box)
+                .setPositiveButton("关闭", null)
+                .show();
+    }
+
+    private static String ellipsis(String s, int n) {
+        return s.length() <= n ? s : s.substring(0, n) + "…";
+    }
+
+    private List<Map<String, Object>> cloudReviews() {
+        synchronized (cloudMarks) {
+            List<Map<String, Object>> out = new ArrayList<Map<String, Object>>();
+            for (Map<String, Object> m : cloudMarks) out.add(m);
+            return out;
+        }
+    }
+
+    private int fetchVer() {
+        if (verFetched) return bookVer;
+        try {
+            bookVer = api.bookVersion(bookId);
+        } catch (Exception e) {
+            bookVer = 0;
+        }
+        verFetched = true;
+        return bookVer;
+    }
+
+    private void persistMarks() {
+        synchronized (localMarks) {
+            store.setHighlights(bookId, Highlights.encode(localMarks));
+        }
+    }
+
+    /** 高亮应用到 PageView：本地深灰、书友浅灰；云端异步到达后重算一次。 */
+    private void applyHighlights() {
+        List<Integer> ranges = new ArrayList<Integer>();
+        List<Integer> kinds = new ArrayList<Integer>();
+        synchronized (localMarks) {
+            for (Highlights.Item it : localMarks) {
+                if (it.idx != chapterIndex) continue;
+                ranges.add(Integer.valueOf(it.start));
+                ranges.add(Integer.valueOf(it.end));
+                kinds.add(Integer.valueOf(PageView.HL_LOCAL));
+            }
+        }
+        synchronized (cloudMarks) {
+            for (Map<String, Object> m : cloudMarks) {
+                String mark = String.valueOf(m.get("markText"));
+                if (mark.length() == 0) continue;
+                int at = currentText.indexOf(mark);
+                if (at < 0) continue;
+                ranges.add(Integer.valueOf(at));
+                ranges.add(Integer.valueOf(at + mark.length()));
+                kinds.add(Integer.valueOf(PageView.HL_CLOUD));
+            }
+        }
+        int[] r = new int[ranges.size()];
+        int[] k = new int[kinds.size()];
+        for (int i = 0; i < ranges.size(); i++) {
+            r[i] = ranges.get(i).intValue();
+            k[i] = kinds.get(i).intValue();
+        }
+        pageView.setHighlightRanges(r, k);
+    }
+
+    /** 章节加载完成后调用：本地立即生效，云端划线+想法数异步补。 */
+    private void loadCloudAnnotations(final String uid) {
+        synchronized (cloudMarks) {
+            cloudMarks.clear();
+        }
+        thoughtCount.clear();
+        applyHighlights();
+        if (demo || LocalBooks.isLocal(bookId)) return;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    List<Map<String, Object>> ul = api.webUnderlines(bookId, uid);
+                    synchronized (cloudMarks) {
+                        cloudMarks.clear();
+                        cloudMarks.addAll(ul);
+                    }
+                } catch (Exception first) {
+                    // 网页通道失败退 E-Ink 通道
+                    Eink.Cred cred = Eink.load(store);
+                    if (cred == null) return;
+                    try {
+                        List<Map<String, Object>> ul =
+                                Eink.underlines(store, cred, bookId, uid);
+                        synchronized (cloudMarks) {
+                            cloudMarks.clear();
+                            cloudMarks.addAll(ul);
+                        }
+                    } catch (Exception e) {
+                        Trace.i("underlines failed: " + e);
+                        return;
+                    }
+                }
+                // 想法数：按 markText 聚合现有想法列表
+                List<Map<String, Object>> revs = fetchReviews();
+                final java.util.HashMap<String, Integer> cnt =
+                        new java.util.HashMap<String, Integer>();
+                for (Map<String, Object> r : revs) {
+                    String m = String.valueOf(r.get("mark"));
+                    if (m.length() == 0) continue;
+                    Integer v = cnt.get(m);
+                    cnt.put(m, Integer.valueOf(v == null ? 1 : v.intValue() + 1));
+                }
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        thoughtCount.clear();
+                        thoughtCount.putAll(cnt);
+                        applyHighlights();
+                    }
+                });
+            }
+        }).start();
+    }
+
+    private List<Map<String, Object>> fetchReviews() {
+        try {
+            return Eink.reviews(store, Eink.load(store), bookId,
+                    String.valueOf(chapters.get(chapterIndex).get("uid")), 0);
+        } catch (Exception e) {
+            try {
+                return api.reviews(bookId,
+                        String.valueOf(chapters.get(chapterIndex).get("uid")), 0);
+            } catch (Exception e2) {
+                return new ArrayList<Map<String, Object>>();
+            }
+        }
     }
 
     private void showOverlay(final String text) {

@@ -10,6 +10,7 @@ import android.text.Spanned;
 import android.text.StaticLayout;
 import android.text.TextPaint;
 import android.text.TextUtils;
+import android.text.style.BackgroundColorSpan;
 import android.text.style.LeadingMarginSpan;
 import android.text.style.LineHeightSpan;
 import android.util.TypedValue;
@@ -28,6 +29,19 @@ public class PageView extends View {
 
         void onPageChanged(int page, int total, int offset);
     }
+
+    /** 长按选择 / 点划线回调，阅读页弹菜单和想法列表用。 */
+    public interface SelectListener {
+        /** 长按松手后的选区（章内绝对偏移）。 */
+        void onSelection(int start, int end);
+
+        /** 点在一条高亮上（kind：1 本地划线 / 2 书友划线）。 */
+        void onHighlightTap(int start, int end, int kind);
+    }
+
+    /** 高亮种类。 */
+    public static final int HL_LOCAL = 1;
+    public static final int HL_CLOUD = 2;
 
     /** 页脚文字来源：整本书进度或按章进度由外部决定。 */
     public interface Footer {
@@ -67,6 +81,34 @@ public class PageView extends View {
     private Callback callback;
     private Footer footer;
     private boolean pendingStartAtEnd;
+
+    // ---------------- 划线高亮 + 长按选择 ----------------
+    /** 高亮区间：[s0,e0,s1,e1,...] 章内绝对偏移，与 kinds 一一对应。 */
+    private int[] hlRanges = new int[0];
+    private int[] hlKinds = new int[0];
+    private SelectListener selectListener;
+    private int selStart = -1;
+    private int selEnd = -1;
+    private boolean selecting;
+    private boolean longFired;
+    private boolean movedFar;
+    private float downX;
+    private float downY;
+    private int wordStart;
+    private int wordEnd;
+    private final Paint handlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Runnable longPress = new Runnable() {
+        @Override
+        public void run() {
+            if (movedFar || longFired) return;
+            int off = offsetFor(downX, downY);
+            if (off < 0) return;
+            longFired = true;
+            selecting = true;
+            selectWord(off);
+            invalidate();
+        }
+    };
 
     public PageView(Context ctx) {
         super(ctx);
@@ -140,6 +182,61 @@ public class PageView extends View {
         if (paraGapLevel == level) return;
         paraGapLevel = level;
         reflow();
+    }
+
+    // ---------------- 划线高亮 ----------------
+
+    /**
+     * 设置高亮区间并重绘。区间是章内绝对偏移，与分页无关；改字号重排后位置依旧。
+     * kinds[i]：1 本地划线（深灰底）、2 书友划线（浅灰底）。
+     */
+    public void setHighlightRanges(int[] ranges, int[] kinds) {
+        hlRanges = ranges == null ? new int[0] : ranges;
+        hlKinds = kinds == null ? new int[0] : kinds;
+        layout = null;
+        invalidate();
+    }
+
+    public void setSelectListener(SelectListener l) {
+        selectListener = l;
+    }
+
+    /** 退出选择态（菜单消失、正文恢复）。 */
+    public void clearSelection() {
+        if (!selecting && selStart < 0) return;
+        selecting = false;
+        selStart = -1;
+        selEnd = -1;
+        layout = null;
+        invalidate();
+    }
+
+    public boolean hasSelection() {
+        return selecting && selStart >= 0 && selEnd > selStart;
+    }
+
+    public int selectionStart() {
+        return selStart;
+    }
+
+    public int selectionEnd() {
+        return selEnd;
+    }
+
+    /** 选区文字，复制 / 查询 / 新划线的摘录都从这取。 */
+    public String selectionText() {
+        if (!hasSelection()) return "";
+        int to = Math.min(selEnd, text.length());
+        return text.substring(Math.min(selStart, to), to);
+    }
+
+    /** 选区首行在视图里的 Y（含 margin），弹菜单贴着它上方。 */
+    public int selectionTop() {
+        if (!hasSelection() || ensureLayout() == null) return -1;
+        int rel = Math.max(0, selStart - starts[index]);
+        int line = layout.getLineForOffset(rel);
+        if (line < 0) return -1;
+        return margin + layout.getLineTop(line);
     }
 
     public int paraGap() {
@@ -245,6 +342,7 @@ public class PageView extends View {
 
     public boolean next() {
         if (index < starts.length - 1) {
+            clearSelection();
             index++;
             layout = null;
             notifyPage();
@@ -257,6 +355,7 @@ public class PageView extends View {
 
     public boolean prev() {
         if (index > 0) {
+            clearSelection();
             index--;
             layout = null;
             notifyPage();
@@ -333,14 +432,17 @@ public class PageView extends View {
     private CharSequence styledParagraphs(int start, int end) {
         CharSequence raw = text.subSequence(start, end);
         if (start >= end) return raw;
-        boolean doIndent = indentCells > 0;
-        if (!doIndent && paraGapLevel <= 0) return raw;
         SpannableStringBuilder ssb = new SpannableStringBuilder(raw);
         int n = ssb.length();
         int want = (int) (paint.getTextSize() * 0.5f * indentCells + 0.5f);
         int gap = (int) (paint.getTextSize() * 0.35f * paraGapLevel + 0.5f);
         int para = 0;
         boolean fresh = start == 0 || text.charAt(start - 1) == '\n';
+        boolean anySpan = indentCells > 0 || paraGapLevel > 0
+                || hlRanges.length > 0 || selStart >= 0;
+        if (!anySpan) return raw;
+        applyHighlightSpans(ssb, start);
+        boolean doIndent = indentCells > 0;
         for (int i = 0; i <= n; i++) {
             if (i < n && ssb.charAt(i) != '\n') continue;
             if (fresh && i > para) {
@@ -395,6 +497,106 @@ public class PageView extends View {
         return (int) w;
     }
 
+    /**
+     * 划线/选区背景色：只改底色不改字符。墨水屏上颜色会变灰阶，
+     * 所以用不同深浅区分：本地划线深、书友划线浅、选区最深。
+     */
+    private void applyHighlightSpans(SpannableStringBuilder ssb, int pageStart) {
+        int pageEnd = pageStart + ssb.length();
+        for (int i = 0; i < hlRanges.length; i++) {
+            int s = Math.max(hlRanges[i], pageStart);
+            int e = Math.min(i * 2 + 1 < hlRanges.length ? hlRanges[i * 2 + 1] : hlRanges[i],
+                    pageEnd);
+            if (e <= s) continue;
+            int kind = i < hlKinds.length ? hlKinds[i] : HL_CLOUD;
+            ssb.setSpan(new BackgroundColorSpan(kind == HL_LOCAL ? 0x33000000 : 0x1E000000),
+                    s - pageStart, e - pageStart, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        if (selStart >= 0 && selEnd > selStart) {
+            int s = Math.max(selStart, pageStart);
+            int e = Math.min(selEnd, pageEnd);
+            if (e > s) {
+                ssb.setSpan(new BackgroundColorSpan(0x4A000000),
+                        s - pageStart, e - pageStart, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
+        }
+    }
+
+    /** 触点 → 章内字符偏移；越界返回 -1。 */
+    private int offsetFor(float x, float y) {
+        StaticLayout l = ensureLayout();
+        if (l == null || l.getLineCount() == 0) return -1;
+        int line = l.getLineForVertical((int) (y - margin));
+        if (line < 0 || line >= l.getLineCount()) return -1;
+        int off = l.getOffsetForHorizontal(line, x - margin);
+        int pageStart = starts[index];
+        int pageEnd = index + 1 < starts.length ? starts[index + 1] : text.length();
+        off = Math.max(0, Math.min(off, l.getText().length()));
+        int abs = pageStart + off;
+        return Math.max(pageStart, Math.min(abs, pageEnd - 1));
+    }
+
+    private StaticLayout ensureLayout() {
+        if (layout != null && layoutStart == starts[index]) return layout;
+        int w = getWidth() - margin * 2;
+        if (w <= 0 || starts.length == 0) return null;
+        int end = index + 1 < starts.length ? starts[index + 1] : text.length();
+        if (end <= starts[index]) return null;
+        layout = layoutOf(starts[index], end, w);
+        layoutStart = starts[index];
+        return layout;
+    }
+
+    /** 长按取词：CJK 按单字，字母/数字按连续段，标点单取。 */
+    private void selectWord(int off) {
+        int s = off;
+        int e = off + 1;
+        if (isWordChar(text.charAt(Math.min(off, text.length() - 1)))) {
+            while (s > 0 && isWordChar(text.charAt(s - 1))) s--;
+            while (e < text.length() && isWordChar(text.charAt(e))) e++;
+        } else if (isLetter(off)) {
+            while (s > 0 && isLetter(s - 1)) s--;
+            while (e < text.length() && isLetter(e)) e++;
+        }
+        wordStart = s;
+        wordEnd = e;
+        selStart = s;
+        selEnd = e;
+    }
+
+    private static boolean isWordChar(char c) {
+        return Character.isLetterOrDigit(c) || c > 127;
+    }
+
+    private boolean isLetter(int off) {
+        return off >= 0 && off < text.length() && Character.isLetter(text.charAt(off));
+    }
+
+    /** 拖动扩展选区：以初始词为锚，触点在锚左则扩到左侧，反之扩到右侧。 */
+    private void extendSelection(float x, float y) {
+        int off = offsetFor(x, y);
+        if (off < 0) return;
+        int anchorS = wordStart;
+        int anchorE = wordEnd;
+        if (off < anchorS) {
+            selStart = off;
+            selEnd = anchorE;
+        } else if (off >= anchorE) {
+            selStart = anchorS;
+            selEnd = Math.min(off + 1, text.length());
+        } else {
+            selStart = anchorS;
+            selEnd = anchorE;
+        }
+        invalidate();
+    }
+
+    private void notifySelection() {
+        if (selectListener != null && selEnd > selStart) {
+            selectListener.onSelection(selStart, selEnd);
+        }
+    }
+
     @Override
     protected void onDraw(Canvas canvas) {
         int w = getWidth() - margin * 2;
@@ -406,6 +608,7 @@ public class PageView extends View {
         canvas.save();
         canvas.translate(margin, margin);
         if (layout != null) layout.draw(canvas);
+        if (selStart >= 0 && selEnd > selStart && layout != null) drawHandles(canvas, layout);
         canvas.restore();
 
         if (!footerShown) return;
@@ -444,6 +647,23 @@ public class PageView extends View {
         }
     }
 
+    /** 选区两端的拖动手柄：一条竖线 + 底部小圆点，官方样式。 */
+    private void drawHandles(Canvas canvas, StaticLayout l) {
+        handlePaint.setColor(0xFF444444);
+        int pageStart = starts[index];
+        int[][] ends = {{selStart, 1}, {selEnd - 1, -1}};
+        for (int[] spec : ends) {
+            int rel = Math.max(0, Math.min(spec[0] - pageStart, l.getText().length()));
+            int line = l.getLineForOffset(rel);
+            if (line < 0 || line >= l.getLineCount()) continue;
+            float x = l.getPrimaryHorizontal(rel);
+            int top = l.getLineTop(line);
+            int bottom = l.getLineBottom(line);
+            canvas.drawLine(x, top, x, bottom + dp(6), handlePaint);
+            canvas.drawCircle(x, bottom + dp(8), dp(4), handlePaint);
+        }
+    }
+
     private String percent() {
         if (text.length() == 0) return "";
         int p = currentOffset() * 100 / Math.max(1, text.length());
@@ -452,10 +672,63 @@ public class PageView extends View {
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
-        if (event.getAction() == MotionEvent.ACTION_DOWN) return true;
-        if (event.getAction() != MotionEvent.ACTION_UP) return true;
-        int w = getWidth();
+        switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                downX = event.getX();
+                downY = event.getY();
+                movedFar = false;
+                longFired = false;
+                postDelayed(longPress, 420);
+                return true;
+            case MotionEvent.ACTION_MOVE:
+                if (Math.abs(event.getX() - downX) > dp(16)
+                        || Math.abs(event.getY() - downY) > dp(16)) {
+                    movedFar = true;
+                    if (!longFired) removeCallbacks(longPress);
+                }
+                if (selecting && longFired) extendSelection(event.getX(), event.getY());
+                return true;
+            case MotionEvent.ACTION_UP:
+                removeCallbacks(longPress);
+                return onUp(event);
+            case MotionEvent.ACTION_CANCEL:
+                removeCallbacks(longPress);
+                return true;
+            default:
+                return true;
+        }
+    }
+
+    private boolean onUp(MotionEvent event) {
         float x = event.getX();
+        // 长按选择结束：保留选区并通知外层弹菜单。
+        if (longFired) {
+            if (selecting) notifySelection();
+            return true;
+        }
+        int w = getWidth();
+        int off = offsetFor(x, event.getY());
+        // 点在选区里：保持菜单。
+        if (selStart >= 0 && off >= selStart && off < selEnd) return true;
+        // 点在选区外：清除选区，且这一下不再触发翻页。
+        if (selStart >= 0) {
+            clearSelection();
+            if (selectListener != null) selectListener.onHighlightTap(-1, -1, 0);
+            return true;
+        }
+        // 点在一条已有高亮上：交给外层（书友划线弹想法，本地划线弹操作菜单）。
+        if (off >= 0) {
+            for (int i = 0; i < hlRanges.length; i++) {
+                int e = i * 2 + 1 < hlRanges.length ? hlRanges[i * 2 + 1] : hlRanges[i];
+                if (off >= hlRanges[i] && off < e) {
+                    int kind = i < hlKinds.length ? hlKinds[i] : HL_CLOUD;
+                    if (selectListener != null) {
+                        selectListener.onHighlightTap(hlRanges[i], e, kind);
+                    }
+                    return true;
+                }
+            }
+        }
         if (x < w * 0.28f) prev();
         else if (x > w * 0.72f) next();
         else if (callback != null) callback.onMenu();

@@ -262,4 +262,20 @@ public final class Json {
         }
         return sb.append('"').toString();
     }
+
+    /** 简单 map → JSON 对象（写划线/想法的请求体）。值支持 String/Number/Boolean。 */
+    public static String write(java.util.Map<String, Object> m) {
+        StringBuilder sb = new StringBuilder("{");
+        boolean first = true;
+        for (java.util.Map.Entry<String, Object> e : m.entrySet()) {
+            if (!first) sb.append(',');
+            first = false;
+            sb.append(quote(e.getKey())).append(':');
+            Object v = e.getValue();
+            if (v instanceof Number) sb.append(v);
+            else if (v instanceof Boolean) sb.append(v);
+            else sb.append(quote(String.valueOf(v)));
+        }
+        return sb.append('}').toString();
+    }
 }

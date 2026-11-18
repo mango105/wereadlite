@@ -511,8 +511,13 @@ public final class Api {
         Resp r = post(Protocol.BASE + "/web/review/add", Json.write(m),
                 Protocol.readerUrl(bookId, chapterUid), 20000);
         Object root = Json.parse(r.body);
-        if (r.code != 200 || Json.str(root, "reviewId", "reviewID").length() == 0) {
-            throw new IOException("addReview 被拒绝：" + trim(r.body));
+        // 成功响应不一定带 reviewId（参考 MiuRead：想法写入不强制要 id），
+        // 只要 HTTP 200 且 errcode/errCode 为 0（或无该字段）就算成功。
+        int err = Json.num(root, "errcode");
+        if (err == 0) err = Json.num(root, "errCode");
+        if (r.code != 200 || err != 0) {
+            String msg = errMsg(root, "服务器拒绝了想法");
+            throw new IOException(msg);
         }
         return Json.str(root, "reviewId", "reviewID");
     }

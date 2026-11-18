@@ -2447,6 +2447,16 @@ public class ReaderActivity extends Activity implements PageView.Callback,
                     public void onClick(android.content.DialogInterface d, int w) {
                         final String content = input.getText().toString().trim();
                         if (content.length() == 0) return;
+                        // 想法只写云端：本地书没有云端 bookId，登录后也不认，直接说明，
+                        // 别发一个注定失败的请求再弹「被拒绝」。
+                        if (LocalBooks.isLocal(bookId)) {
+                            brief("本地书的想法暂不支持同步到微信读书", 2200);
+                            return;
+                        }
+                        if (!api.loggedIn()) {
+                            brief("请先登录微信读书，再发布想法", 2200);
+                            return;
+                        }
                         final String chapterUid =
                                 String.valueOf(chapters.get(chapterIndex).get("uid"));
                         final int s = anchorS;
@@ -2471,7 +2481,9 @@ public class ReaderActivity extends Activity implements PageView.Callback,
                                     ui.post(new Runnable() {
                                         @Override
                                         public void run() {
-                                            brief("想法同步失败：" + ex.getMessage());
+                                            String why = ex.getMessage();
+                                            if (why == null || why.length() == 0) why = "网络异常";
+                                            brief("想法未发布：" + why, 2200);
                                         }
                                     });
                                 }
@@ -2839,13 +2851,18 @@ public class ReaderActivity extends Activity implements PageView.Callback,
         }
     };
 
-    /** 轻提示：小胶囊浮层，1 秒后自动消失，不做全屏重绘。 */
+    /** 轻提示：小胶囊浮层，默认 0.9 秒，不做全屏重绘。 */
     private void brief(String text) {
+        brief(text, 900);
+    }
+
+    /** 需要读清楚的提示（如发布失败原因）停久一点。 */
+    private void brief(String text, long millis) {
         if (hint == null) return;
         hint.setText(text);
         hint.setVisibility(View.VISIBLE);
         hint.removeCallbacks(hideHint);
-        hint.postDelayed(hideHint, 900);
+        hint.postDelayed(hideHint, millis);
     }
 
     // ---------------- 按键 ----------------

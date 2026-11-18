@@ -106,7 +106,10 @@ public class PageView extends View {
             longFired = true;
             selecting = true;
             selectWord(off);
-            invalidate();
+            // 选区底色是布局里的 span：不清缓存布局，重绘画的还是无选区的旧布局
+            // （长按起选看不见任何高亮标识的元凶）。只刷选区行，避免墨水屏全刷。
+            layout = null;
+            invalidateRegion(selStart, selEnd);
         }
     };
 

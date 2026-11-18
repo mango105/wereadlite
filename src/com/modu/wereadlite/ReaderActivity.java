@@ -43,6 +43,7 @@ public class ReaderActivity extends Activity implements PageView.Callback,
     private PageView pageView;
     private TextView header;
     private TextView overlay;
+    private TextView hint;
 
     private View toolbar;
     private View topToolbar;
@@ -241,6 +242,19 @@ public class ReaderActivity extends Activity implements PageView.Callback,
         overlay.setBackgroundColor(Color.WHITE);
         root.addView(overlay, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        // 轻提示：只占一小块深色胶囊。之前复用全屏白底 overlay 当 toast，
+        // 在墨水屏上就是整屏白闪一下（删除划线/复制的闪屏）。
+        hint = Ui.text(this, "", 13.5f, Color.WHITE);
+        hint.setGravity(Gravity.CENTER);
+        hint.setPadding(dp(16), dp(8), dp(16), dp(8));
+        hint.setBackgroundDrawable(Ui.box(0xEE1F1F1F, 0x00000000, 0, dp(6)));
+        hint.setVisibility(View.GONE);
+        FrameLayout.LayoutParams hlp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER_HORIZONTAL | Gravity.BOTTOM);
+        hlp.bottomMargin = dp(110);
+        root.addView(hint, hlp);
 
         // 左上角返回箭头已去掉：书名/返回在底部工具栏都有，页眉只留章节名。
         // 唤出/收起工具栏由点击正文（onMenu）承担，不再需要这颗悬浮按钮。
@@ -2304,7 +2318,9 @@ public class ReaderActivity extends Activity implements PageView.Callback,
 
     /** 长按选择后的浮动操作条：划线 / 写想法 / 复制 / 查询，贴在选区上方。 */
     private void showSelMenu() {
-        dismissSelMenu();
+        // 只关旧菜单，不能顺手清选区：菜单弹出时正文要保留「预划线」底色，
+        // selectionTop() 也要靠选区算位置。
+        hideSelMenu();
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setBackgroundDrawable(Ui.box(0xEE1F1F1F, 0x00000000, 0, dp(8)));
@@ -2317,27 +2333,38 @@ public class ReaderActivity extends Activity implements PageView.Callback,
                 @Override
                 public void onClick(View v) {
                     String l = ((TextView) v).getText().toString();
-                    dismissSelMenu();
-                    if (l.equals("划线")) createHighlight();
-                    else if (l.equals("写想法")) writeThought();
+                    // 先只收菜单，选区留给各动作自己取（复制/查询要读 selectionText）
+                    hideSelMenu();
+                    if (l.equals("划线")) {
+                        pageView.clearSelection();
+                        createHighlight();
+                    } else if (l.equals("写想法")) writeThought();
                     else if (l.equals("复制")) copySelection();
-                    else if (l.equals("查询")) querySelection();
+                    else querySelection();
                 }
             });
             bar.addView(b);
         }
+        // 非聚焦弹窗：点菜单外的区域要能落到阅读页上（一次点击=撤选区+翻页），
+        // 聚焦弹窗会把这一下吃掉，只关闭自己，用户得连点两下。
         selMenu = new android.widget.PopupWindow(bar,
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, true);
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, false);
         selMenu.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-        selMenu.setOutsideTouchable(true);
+        selMenu.setOutsideTouchable(false);
         int top = pageView.selectionTop();
         int y = top > dp(90) ? top - dp(52) : dp(60);
         selMenu.showAtLocation(pageView, Gravity.NO_GRAVITY, dp(40), y);
     }
 
-    private void dismissSelMenu() {
+    /** 只收菜单，保留选区（菜单各项自己决定何时清）。 */
+    private void hideSelMenu() {
         if (selMenu != null && selMenu.isShowing()) selMenu.dismiss();
         selMenu = null;
+    }
+
+    /** 收菜单并撤选区（点空白、返回键）。 */
+    private void dismissSelMenu() {
+        hideSelMenu();
         pageView.clearSelection();
     }
 
@@ -2388,8 +2415,13 @@ public class ReaderActivity extends Activity implements PageView.Callback,
 
     /** 写想法：弹输入框，发布默认私密（isPrivate=1），走 /web/review/add。 */
     private void writeThought() {
-        final String mark = markTextAt(selAnchorStart, selAnchorEnd);
         pageView.clearSelection();
+        writeThoughtAt(selAnchorStart, selAnchorEnd);
+    }
+
+    /** 对一段已有文字（选区或已有划线）写想法，摘录取该段原文。 */
+    private void writeThoughtAt(final int anchorS, final int anchorE) {
+        final String mark = markTextAt(anchorS, anchorE);
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(20), dp(16), dp(20), dp(8));
@@ -2417,8 +2449,8 @@ public class ReaderActivity extends Activity implements PageView.Callback,
                         if (content.length() == 0) return;
                         final String chapterUid =
                                 String.valueOf(chapters.get(chapterIndex).get("uid"));
-                        final int s = selAnchorStart;
-                        final int e = selAnchorEnd;
+                        final int s = anchorS;
+                        final int e = anchorE;
                         new Thread(new Runnable() {
                             @Override
                             public void run() {
@@ -2478,7 +2510,7 @@ public class ReaderActivity extends Activity implements PageView.Callback,
     private void showMarkActions(final int s, final int e) {
         final Highlights.Item it = Highlights.at(synchronizedMarks(), chapterIndex, s);
         if (it == null) return;
-        String[] items = {"复制原文", "删除划线"};
+        String[] items = {"复制原文", "写想法", "删除划线"};
         new AlertDialog.Builder(this)
                 .setItems(items, new android.content.DialogInterface.OnClickListener() {
                     @Override
@@ -2490,6 +2522,8 @@ public class ReaderActivity extends Activity implements PageView.Callback,
                             cm.setPrimaryClip(android.content.ClipData.newPlainText(
                                     "text", markTextAt(s, e)));
                             brief("已复制");
+                        } else if (w == 1) {
+                            writeThoughtAt(s, e);
                         } else {
                             deleteMark(it);
                         }
@@ -2798,14 +2832,20 @@ public class ReaderActivity extends Activity implements PageView.Callback,
         return progress;
     }
 
+    private final Runnable hideHint = new Runnable() {
+        @Override
+        public void run() {
+            if (hint != null) hint.setVisibility(View.GONE);
+        }
+    };
+
+    /** 轻提示：小胶囊浮层，1 秒后自动消失，不做全屏重绘。 */
     private void brief(String text) {
-        showOverlay(text);
-        ui.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                hideOverlay();
-            }
-        }, 900);
+        if (hint == null) return;
+        hint.setText(text);
+        hint.setVisibility(View.VISIBLE);
+        hint.removeCallbacks(hideHint);
+        hint.postDelayed(hideHint, 900);
     }
 
     // ---------------- 按键 ----------------
@@ -2817,8 +2857,14 @@ public class ReaderActivity extends Activity implements PageView.Callback,
         boolean repeat = event.getRepeatCount() > 0;
 
         if (code == KeyEvent.KEYCODE_BACK) {
+            // 选区菜单不是聚焦弹窗，返回键收不到，这里先收掉它
+            if (selMenu != null || pageView.hasSelection()) {
+                dismissSelMenu();
+                return true;
+            }
+            // 按退栈顺序收面板（笔记页/目录/进度…），比 hideToolbar 多了笔记页
             if (anyPanelOpen()) {
-                hideToolbar();
+                backOrMenu();
                 return true;
             }
             return super.dispatchKeyEvent(event);

@@ -492,11 +492,13 @@ public class PageView extends View {
 
         @Override
         public void chooseHeight(CharSequence text, int start, int end,
-                                 int spanStart, int spanEnd, Paint.FontMetricsInt fm) {
-            // LineHeightSpan 是段落级 span：StaticLayout 会对段落内每一行都调到这里，
-            // 只有当前行真的包含段首字符（spanStart 在行范围内）才抬高这一行，
-            // 否则间距会泄漏成整段行距（实测整页只装得下几行的元凶）。
-            if (spanStart < start || spanStart >= end) return;
+                                 int spanstartv, int v, Paint.FontMetricsInt fm) {
+            // StaticLayout 对段内每一行都会调到这里。查过 AOSP 源码：第 4/5 个参数
+            // 是「span 起始行的顶部 Y」和「当前行的顶部 Y」（都是像素，不是字符偏移）。
+            // 两者相等才是段首行——之前误把 spanstartv 当字符偏移和行的字符区间比，
+            // 实际是拿像素值跟字符下标瞎比，哪些行被抬高全看运气：整章测量和单页
+            // 重排抬的行数不一样，页高对不上，最后一行直接叠进页脚。
+            if (spanstartv != v) return;
             fm.ascent -= gap;
             fm.top -= gap;
         }
@@ -556,11 +558,23 @@ public class PageView extends View {
         if (layout != null && layoutStart == starts[index]) return layout;
         int w = getWidth() - margin * 2;
         if (w <= 0 || starts.length == 0) return null;
-        int end = index + 1 < starts.length ? starts[index + 1] : text.length();
+        int end = pageDrawEnd();
         if (end <= starts[index]) return null;
         layout = layoutOf(starts[index], end, w);
         layoutStart = starts[index];
         return layout;
+    }
+
+    /**
+     * 单页布局的绘制终点。页尾的换行符在整章布局里只是分页边界（后面还有正文，
+     * 不产生空行），但在单页布局里它就是文本结尾，StaticLayout 会为它渲染一行
+     * 空白行——实测同一区间单页 24 行 vs 整章 23 行，多出的这一行正好把页底
+     * 撑进页脚。剥掉这个换行符，绘制高度就和分页测量一致了。
+     */
+    private int pageDrawEnd() {
+        int end = index + 1 < starts.length ? starts[index + 1] : text.length();
+        if (end > starts[index] && text.charAt(end - 1) == '\n') end--;
+        return end;
     }
 
     /** 长按取词：拉丁/数字按连续段，中文单字起选——CJK 连选会一次选中整段。 */
@@ -634,7 +648,7 @@ public class PageView extends View {
     @Override
     protected void onDraw(Canvas canvas) {
         int w = getWidth() - margin * 2;
-        int end = index + 1 < starts.length ? starts[index + 1] : text.length();
+        int end = pageDrawEnd();
         if (layout == null || layoutStart != starts[index]) {
             layout = layoutOf(starts[index], end, w);
             layoutStart = starts[index];
@@ -744,14 +758,18 @@ public class PageView extends View {
         int off = offsetFor(x, event.getY());
         // 点在选区里：保持菜单。
         if (selStart >= 0 && off >= selStart && off < selEnd) return true;
-        // 点在选区外：清除选区，且这一下不再触发翻页。
+        // 点在选区外：撤掉选区与菜单，然后继续按普通点击处理。
+        // 关键：不能 return——用户在菜单弹出后直接点右侧想翻页，这一下就应该既
+        // 取消划线、又真的翻页；否则第一次点只清选区、第二次才翻页。
+        boolean dismissedSel = false;
         if (selStart >= 0) {
             clearSelection();
             if (selectListener != null) selectListener.onHighlightTap(-1, -1, 0);
-            return true;
+            dismissedSel = true;
         }
         // 点在一条已有高亮上：交给外层（书友划线弹想法，本地划线弹操作菜单）。
-        if (off >= 0) {
+        // 但刚撤掉选区的那一下不算，它应该直接翻页/唤工具条。
+        if (!dismissedSel && off >= 0) {
             for (int i = 0; i + 1 < hlRanges.length; i += 2) {
                 int e = hlRanges[i + 1];
                 if (off >= hlRanges[i] && off < e) {

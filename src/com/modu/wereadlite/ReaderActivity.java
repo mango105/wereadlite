@@ -302,7 +302,7 @@ public class ReaderActivity extends Activity implements PageView.Callback,
         return t;
     }
 
-    /** 底部工具条：对齐官方阅读态——返回 / 目录 / 进度罗盘 / 收起 / 字号 / 听书。 */
+    /** 底部工具条：返回书架 / 目录 / 进度罗盘 / 字号；收起靠点屏幕中间。 */
     private View buildToolbar() {
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
@@ -329,12 +329,7 @@ public class ReaderActivity extends Activity implements PageView.Callback,
                 showProgress(true);
             }
         }), slot());
-        bar.addView(barButton(NavIcon.DOT, "收起菜单", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                hideToolbar();
-            }
-        }), slot());
+        // 收起菜单按钮去掉：点屏幕中间即可收起，单独做按钮属于多此一举。
         bar.addView(barButton(NavIcon.LETTER_A, "字体设置", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -483,8 +478,9 @@ public class ReaderActivity extends Activity implements PageView.Callback,
         intervalRow.addView(il, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         View ispace = new View(this);
-        intervalRow.addView(ispace, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        // 高度必须给 0：裸 View 的默认 onMeasure 在 WRAP_CONTENT(AT_MOST) 下
+        // 会返回整个可用高度，把这一行撑成 900+px 的巨型白板盖住全屏。
+        intervalRow.addView(ispace, new LinearLayout.LayoutParams(0, 0, 1f));
         intervalSeek = new SeekRow(this);
         intervalSeek.setRange(10, 120);
         intervalSeek.setEdges("10", 8f, "120", 8f);
@@ -2629,8 +2625,11 @@ public class ReaderActivity extends Activity implements PageView.Callback,
         }
         int[] r = new int[ranges.size()];
         int[] k = new int[kinds.size()];
-        for (int i = 0; i < ranges.size(); i++) {
+        // r 是扁平 pairs（每个划线占 2 个），k 按对存——两者长度不同，分开拷
+        for (int i = 0; i < r.length; i++) {
             r[i] = ranges.get(i).intValue();
+        }
+        for (int i = 0; i < k.length; i++) {
             k[i] = kinds.get(i).intValue();
         }
         pageView.setHighlightRanges(r, k);

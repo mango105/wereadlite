@@ -503,12 +503,12 @@ public class PageView extends View {
      */
     private void applyHighlightSpans(SpannableStringBuilder ssb, int pageStart) {
         int pageEnd = pageStart + ssb.length();
-        for (int i = 0; i < hlRanges.length; i++) {
+        // hlRanges 是扁平 pairs：{s0,e0,s1,e1,…}，kinds 按对存
+        for (int i = 0; i + 1 < hlRanges.length; i += 2) {
             int s = Math.max(hlRanges[i], pageStart);
-            int e = Math.min(i * 2 + 1 < hlRanges.length ? hlRanges[i * 2 + 1] : hlRanges[i],
-                    pageEnd);
+            int e = Math.min(hlRanges[i + 1], pageEnd);
             if (e <= s) continue;
-            int kind = i < hlKinds.length ? hlKinds[i] : HL_CLOUD;
+            int kind = i / 2 < hlKinds.length ? hlKinds[i / 2] : HL_CLOUD;
             ssb.setSpan(new BackgroundColorSpan(kind == HL_LOCAL ? 0x33000000 : 0x1E000000),
                     s - pageStart, e - pageStart, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
@@ -718,10 +718,10 @@ public class PageView extends View {
         }
         // 点在一条已有高亮上：交给外层（书友划线弹想法，本地划线弹操作菜单）。
         if (off >= 0) {
-            for (int i = 0; i < hlRanges.length; i++) {
-                int e = i * 2 + 1 < hlRanges.length ? hlRanges[i * 2 + 1] : hlRanges[i];
+            for (int i = 0; i + 1 < hlRanges.length; i += 2) {
+                int e = hlRanges[i + 1];
                 if (off >= hlRanges[i] && off < e) {
-                    int kind = i < hlKinds.length ? hlKinds[i] : HL_CLOUD;
+                    int kind = i / 2 < hlKinds.length ? hlKinds[i / 2] : HL_CLOUD;
                     if (selectListener != null) {
                         selectListener.onHighlightTap(hlRanges[i], e, kind);
                     }

@@ -81,16 +81,6 @@ public final class Store {
         sp.edit().putInt("indentCells", v).commit();
     }
 
-    /** 段间距档位 0–4（0 关闭）。老版本是布尔值，读一次自动迁移成档位。 */
-    public int paraGapN() {
-        if (sp.contains("paraGapN")) return sp.getInt("paraGapN", 0);
-        return sp.getBoolean("paraGap", false) ? 1 : 0;
-    }
-
-    public void setParaGapN(int v) {
-        sp.edit().putInt("paraGapN", Math.max(0, Math.min(4, v))).commit();
-    }
-
     /** 行距百分比，116 = 1.16 倍。旧版本存的是 0/1/2 档位，这里做一次迁移。 */
     public int linePct() {
         if (sp.contains("linePct")) return sp.getInt("linePct", 116);

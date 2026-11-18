@@ -319,6 +319,36 @@ public final class Protocol {
         return out.toString().trim();
     }
 
+    /**
+     * 去掉正文开头重复的章节标题行。
+     *
+     * 老版本导入的本地 EPUB，<title> 与 <h1> 的章节名都会被抽进正文，
+     * 于是正文开头连续出现两行一样的标题（顶部标题栏已经显示一次，正文里
+     * 就成了两遍）。这里按行去掉开头所有与 title 相同的行，忽略首尾空白和
+     * 全角/半角空格差异。仅在「至少还剩一行正文」时才去，避免把只有标题的
+     * 空章节清空。title 为空或正文不以标题开头时原样返回。
+     */
+    public static String dropRepeatTitle(String text, String title) {
+        if (text == null || title == null) return text;
+        String want = normTitle(title);
+        if (want.length() == 0) return text;
+        String[] lines = text.split("\n", -1);
+        int drop = 0;
+        while (drop < lines.length && normTitle(lines[drop]).equals(want)) drop++;
+        if (drop == 0 || drop >= lines.length) return text; // 一行都别全删光
+        StringBuilder out = new StringBuilder(text.length());
+        for (int i = drop; i < lines.length; i++) {
+            if (out.length() > 0) out.append('\n');
+            out.append(lines[i]);
+        }
+        return out.toString();
+    }
+
+    /** 标题比较用的归一化：trim + 全角空格 / 不间断空格统一成普通空格。 */
+    private static String normTitle(String s) {
+        return s.replace('\u3000', ' ').replace('\u00a0', ' ').trim();
+    }
+
     private static final Pattern NUMERIC = Pattern.compile("&#(x?)([0-9A-Fa-f]+);");
 
     /**

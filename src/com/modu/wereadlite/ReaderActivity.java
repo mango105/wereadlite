@@ -53,9 +53,6 @@ public class ReaderActivity extends Activity implements PageView.Callback,
     private View paraPanel;
     private TextView paraCardFlush;
     private TextView paraCardIndent;
-    private TextView gapMinus;
-    private TextView gapValue;
-    private TextView gapPlus;
     private View progressPanel;
     private SeekRow progressRow;
     private TextView progressPercent;
@@ -231,7 +228,6 @@ public class ReaderActivity extends Activity implements PageView.Callback,
         pageView.setLinePct(store.linePct());
         pageView.setMarginDp(store.marginDp());
         pageView.setIndentCells(store.indentCells());
-        pageView.setParaGap(store.paraGapN());
         page.addView(pageView, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         root.addView(page, new FrameLayout.LayoutParams(
@@ -1096,7 +1092,7 @@ public class ReaderActivity extends Activity implements PageView.Callback,
         return t;
     }
 
-    /** 图6：段落样式——首行顶格 / 首行缩进 卡片 + 段间距开关。 */
+    /** 图6：段落样式——首行顶格 / 首行缩进 卡片。 */
     private View buildParaPanel() {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
@@ -1129,38 +1125,6 @@ public class ReaderActivity extends Activity implements PageView.Callback,
         im.setMargins(dp(10), 0, 0, 0);
         cards.addView(paraCardIndent, im);
         panel.addView(cards, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        // 段间距：−/档位/＋，0 关闭
-        LinearLayout gapRow = new LinearLayout(this);
-        gapRow.setOrientation(LinearLayout.HORIZONTAL);
-        gapRow.setGravity(Gravity.CENTER_VERTICAL);
-        gapRow.setPadding(dp(18), dp(8), dp(18), dp(12));
-        TextView gl = Ui.text(this, "段间距", 14, Ui.INK);
-        gapRow.addView(gl, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        gapMinus = stepButton("−");
-        gapMinus.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                setParaGapN(store.paraGapN() - 1);
-            }
-        });
-        gapRow.addView(gapMinus);
-        gapValue = Ui.text(this, "", 13, Ui.INK);
-        gapValue.setGravity(Gravity.CENTER);
-        gapValue.setMinWidth(dp(58));
-        gapRow.addView(gapValue);
-        gapPlus = stepButton("+");
-        gapPlus.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                setParaGapN(store.paraGapN() + 1);
-            }
-        });
-        gapRow.addView(gapPlus);
-        refreshGapRow();
-        panel.addView(gapRow, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView done = flatButton("完成", 13.5f, Ui.INK);
@@ -1210,30 +1174,10 @@ public class ReaderActivity extends Activity implements PageView.Callback,
                 selected ? Ui.INK : Ui.LINE, 1, dp(8)));
     }
 
-    /** 段间距档位（0–4）：0 关闭，1 档约 0.35 倍字高。 */
-    private void setParaGapN(int n) {
-        n = Math.max(0, Math.min(4, n));
-        store.setParaGapN(n);
-        pageView.setParaGap(n);
-        refreshGapRow();
-        savePos();
-    }
-
-    private void refreshGapRow() {
-        if (gapValue == null) return;
-        int n = store.paraGapN();
-        gapValue.setText(n == 0 ? "关" : String.valueOf(n));
-        gapMinus.setEnabled(n > 0);
-        gapMinus.setTextColor(n > 0 ? Ui.INK : 0xFFBBBBBB);
-        gapPlus.setEnabled(n < 4);
-        gapPlus.setTextColor(n < 4 ? Ui.INK : 0xFFBBBBBB);
-    }
-
     private void showParaPanel(boolean show) {
         if (paraPanel == null) return;
         if (show) {
             refreshParaCards();
-            refreshGapRow();
             displayPanel.setVisibility(View.GONE);
         }
         paraPanel.setVisibility(show ? View.VISIBLE : View.GONE);
@@ -2187,8 +2131,10 @@ public class ReaderActivity extends Activity implements PageView.Callback,
                 @Override
                 public void run() {
                     try {
-                        final String body = LocalBooks.chapterText(
+                        String raw = LocalBooks.chapterText(
                                 ReaderActivity.this, bookId, String.valueOf(chapter.get("uid")));
+                        // 老版本导入的 EPUB 正文开头可能残留重复的章节标题，去掉后再排版。
+                        final String body = Protocol.dropRepeatTitle(raw, chapterTitle);
                         ui.post(new Runnable() {
                             @Override
                             public void run() {

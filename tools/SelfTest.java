@@ -21,6 +21,7 @@ public class SelfTest {
         testJson();
         testLog();
         testHtml();
+        testDropRepeatTitle();
         testShelfFault();
         testPager();
         testStyleLabel();
@@ -196,6 +197,36 @@ public class SelfTest {
         eq("html 未知实体丢弃", Protocol.htmlToText("a&xyz;b"), "ab");
         eq("html 空白折叠", Protocol.htmlToText("  <div> 甲 </div>\n\n\n<div>乙</div>  "), "甲\n乙");
         eq("html 空", Protocol.htmlToText(null), "");
+    }
+
+    static void testDropRepeatTitle() {
+        String title = "第二回 述病情太医藏隐曲 定总督首辅出奇招";
+        // 老版本 EPUB：标题重复两遍后接正文
+        eq("去重复标题-两遍",
+                Protocol.dropRepeatTitle(title + "\n" + title + "\n紧挨乾清宫的东暖阁。", title),
+                "紧挨乾清宫的东暖阁。");
+        // 只重复一遍（<h1> 与正文首行相同）
+        eq("去重复标题-一遍",
+                Protocol.dropRepeatTitle(title + "\n紧挨乾清宫。", title), "紧挨乾清宫。");
+        // 多遍
+        eq("去重复标题-三遍",
+                Protocol.dropRepeatTitle(title + "\n" + title + "\n" + title + "\n正文。", title),
+                "正文。");
+        // 标题带首尾空白 / 全角空格差异
+        eq("去重复标题-空白差异",
+                Protocol.dropRepeatTitle("　" + title + "　\n" + title + "\n正文。", title),
+                "正文。");
+        // 正文不以标题开头：原样返回
+        eq("去重复标题-正文无标题",
+                Protocol.dropRepeatTitle("紧挨乾清宫。\n" + title, title),
+                "紧挨乾清宫。\n" + title);
+        // 整章只有标题：不能删光
+        eq("去重复标题-保留空章",
+                Protocol.dropRepeatTitle(title + "\n" + title, title), title + "\n" + title);
+        // 标题为空 / 正文为空
+        eq("去重复标题-空标题", Protocol.dropRepeatTitle("正文。", ""), "正文。");
+        eq("去重复标题-空正文", Protocol.dropRepeatTitle("", title), "");
+        eq("去重复标题-null", Protocol.dropRepeatTitle(null, title), null);
     }
 
     // ---------- 书架错误码 ----------

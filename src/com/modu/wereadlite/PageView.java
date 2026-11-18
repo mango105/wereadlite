@@ -12,7 +12,6 @@ import android.text.TextPaint;
 import android.text.TextUtils;
 import android.text.style.BackgroundColorSpan;
 import android.text.style.LeadingMarginSpan;
-import android.text.style.LineHeightSpan;
 import android.util.TypedValue;
 import android.view.MotionEvent;
 import android.view.View;
@@ -72,8 +71,6 @@ public class PageView extends View {
     private int footerHeight;
     /** 首行缩进，按半角格算：2 格 = 1 个汉字，4 格即标准的两字缩进。 */
     private int indentCells = 4;
-    /** 段间距档位 0–4：0 关闭，1 档约为 0.35 倍字高，其余按档递增。 */
-    private int paraGapLevel;
     private StaticLayout layout;
     private int layoutStart = -1;
     /** 页脚是否绘制：工具条弹起时隐藏，但不改变正文区域。 */
@@ -179,14 +176,6 @@ public class PageView extends View {
         return indentCells;
     }
 
-    /** 段间距档位 0–4：段落之间留一条窄空白，不改字符、不影响进度偏移。 */
-    public void setParaGap(int level) {
-        level = Math.max(0, Math.min(4, level));
-        if (paraGapLevel == level) return;
-        paraGapLevel = level;
-        reflow();
-    }
-
     // ---------------- 划线高亮 ----------------
 
     /**
@@ -253,10 +242,6 @@ public class PageView extends View {
         int line = layout.getLineForOffset(rel);
         if (line < 0) return -1;
         return margin + layout.getLineTop(line);
-    }
-
-    public int paraGap() {
-        return paraGapLevel;
     }
 
     /** 字号/行距/边距/缩进变化后重新分页，并保持当前阅读位置。 */
@@ -451,11 +436,9 @@ public class PageView extends View {
         SpannableStringBuilder ssb = new SpannableStringBuilder(raw);
         int n = ssb.length();
         int want = (int) (paint.getTextSize() * 0.5f * indentCells + 0.5f);
-        int gap = (int) (paint.getTextSize() * 0.35f * paraGapLevel + 0.5f);
         int para = 0;
         boolean fresh = start == 0 || text.charAt(start - 1) == '\n';
-        boolean anySpan = indentCells > 0 || paraGapLevel > 0
-                || hlRanges.length > 0 || selStart >= 0;
+        boolean anySpan = indentCells > 0 || hlRanges.length > 0 || selStart >= 0;
         if (!anySpan) return raw;
         applyHighlightSpans(ssb, start);
         boolean doIndent = indentCells > 0;
@@ -469,39 +452,11 @@ public class PageView extends View {
                                 Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                     }
                 }
-                // 段间距加在段首第一个字符上（不是页首第一段），抬高行顶留白。
-                // LineHeightSpan 只改绘制高度，不改变字符数，进度偏移完全不受影响。
-                if (paraGapLevel > 0 && para < n) {
-                    ssb.setSpan(new ParaGapSpan(gap), para, para + 1,
-                            Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-                }
             }
             para = i + 1;
             fresh = true;
         }
         return ssb;
-    }
-
-    /** 段首行顶部留白；只调字体度量，不动文本长度。 */
-    private static final class ParaGapSpan implements LineHeightSpan {
-        private final int gap;
-
-        ParaGapSpan(int gap) {
-            this.gap = gap;
-        }
-
-        @Override
-        public void chooseHeight(CharSequence text, int start, int end,
-                                 int spanstartv, int v, Paint.FontMetricsInt fm) {
-            // StaticLayout 对段内每一行都会调到这里。查过 AOSP 源码：第 4/5 个参数
-            // 是「span 起始行的顶部 Y」和「当前行的顶部 Y」（都是像素，不是字符偏移）。
-            // 两者相等才是段首行——之前误把 spanstartv 当字符偏移和行的字符区间比，
-            // 实际是拿像素值跟字符下标瞎比，哪些行被抬高全看运气：整章测量和单页
-            // 重排抬的行数不一样，页高对不上，最后一行直接叠进页脚。
-            if (spanstartv != v) return;
-            fm.ascent -= gap;
-            fm.top -= gap;
-        }
     }
 
     /** 段落开头已有空白占多宽（半角空格 / 全角空格 / Tab / 不换行空格）。 */

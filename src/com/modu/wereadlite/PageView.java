@@ -191,24 +191,37 @@ public class PageView extends View {
      * kinds[i]：1 本地划线（深灰底）、2 书友划线（浅灰底）。
      */
     public void setHighlightRanges(int[] ranges, int[] kinds) {
+        // 新旧区间并集才是脏区域：新增要画、删掉要还原
+        int s = -1;
+        int e = -1;
+        for (int i = 0; i + 1 < hlRanges.length; i += 2) {
+            s = s < 0 ? hlRanges[i] : Math.min(s, hlRanges[i]);
+            e = Math.max(e, hlRanges[i + 1]);
+        }
         hlRanges = ranges == null ? new int[0] : ranges;
         hlKinds = kinds == null ? new int[0] : kinds;
+        for (int i = 0; i + 1 < hlRanges.length; i += 2) {
+            s = s < 0 ? hlRanges[i] : Math.min(s, hlRanges[i]);
+            e = Math.max(e, hlRanges[i + 1]);
+        }
         layout = null;
-        invalidate();
+        invalidateRegion(s, e);
     }
 
     public void setSelectListener(SelectListener l) {
         selectListener = l;
     }
 
-    /** 退出选择态（菜单消失、正文恢复）。 */
+    /** 退出选择态（菜单消失、正文恢复）。只刷选区行，不全屏重绘。 */
     public void clearSelection() {
         if (!selecting && selStart < 0) return;
         selecting = false;
+        int s = selStart;
+        int e = selEnd;
         selStart = -1;
         selEnd = -1;
         layout = null;
-        invalidate();
+        invalidateRegion(s, e);
     }
 
     public boolean hasSelection() {
@@ -547,16 +560,14 @@ public class PageView extends View {
         return layout;
     }
 
-    /** 长按取词：CJK 按单字，字母/数字按连续段，标点单取。 */
+    /** 长按取词：拉丁/数字按连续段，中文单字起选——CJK 连选会一次选中整段。 */
     private void selectWord(int off) {
         int s = off;
         int e = off + 1;
-        if (isWordChar(text.charAt(Math.min(off, text.length() - 1)))) {
-            while (s > 0 && isWordChar(text.charAt(s - 1))) s--;
-            while (e < text.length() && isWordChar(text.charAt(e))) e++;
-        } else if (isLetter(off)) {
-            while (s > 0 && isLetter(s - 1)) s--;
-            while (e < text.length() && isLetter(e)) e++;
+        char c = text.charAt(Math.min(off, text.length() - 1));
+        if (c < 128 && Character.isLetterOrDigit(c)) {
+            while (s > 0 && Character.isLetterOrDigit(text.charAt(s - 1))) s--;
+            while (e < text.length() && Character.isLetterOrDigit(text.charAt(e))) e++;
         }
         wordStart = s;
         wordEnd = e;
@@ -564,18 +575,12 @@ public class PageView extends View {
         selEnd = e;
     }
 
-    private static boolean isWordChar(char c) {
-        return Character.isLetterOrDigit(c) || c > 127;
-    }
-
-    private boolean isLetter(int off) {
-        return off >= 0 && off < text.length() && Character.isLetter(text.charAt(off));
-    }
-
     /** 拖动扩展选区：以初始词为锚，触点在锚左则扩到左侧，反之扩到右侧。 */
     private void extendSelection(float x, float y) {
         int off = offsetFor(x, y);
         if (off < 0) return;
+        int oldS = selStart;
+        int oldE = selEnd;
         int anchorS = wordStart;
         int anchorE = wordEnd;
         if (off < anchorS) {
@@ -588,7 +593,33 @@ public class PageView extends View {
             selStart = anchorS;
             selEnd = anchorE;
         }
-        invalidate();
+        // 选区底色是 span，必须在布局重建后才会更新
+        layout = null;
+        invalidateRegion(Math.min(oldS, selStart), Math.max(oldE, selEnd));
+    }
+
+    /**
+     * 只重刷 [s,e) 覆盖的行。选区/划线都是 span 级变化，重建布局开销很小，
+     * 但整页 invalidate 在墨水屏上是一次全刷——肉眼就是「白屏闪一下」。
+     */
+    private void invalidateRegion(int s, int e) {
+        StaticLayout l = layout != null ? layout : ensureLayout();
+        if (l == null || s < 0 || e <= s || starts.length == 0) {
+            invalidate();
+            return;
+        }
+        int pageStart = starts[index];
+        int pageEnd = index + 1 < starts.length ? starts[index + 1] : text.length();
+        int rs = Math.max(s, pageStart) - pageStart;
+        int re = Math.min(e, pageEnd) - pageStart;
+        if (re <= rs || l.getLineCount() == 0) {
+            invalidate();
+            return;
+        }
+        int first = l.getLineForOffset(rs);
+        int last = l.getLineForOffset(Math.min(re, l.getText().length()) - 1);
+        invalidate(margin, Math.max(0, margin + l.getLineTop(first) - dp(2)),
+                getWidth() - margin, margin + l.getLineBottom(last) + dp(2));
     }
 
     private void notifySelection() {

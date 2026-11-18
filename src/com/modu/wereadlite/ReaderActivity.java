@@ -2354,7 +2354,8 @@ public class ReaderActivity extends Activity implements PageView.Callback,
             persistMarks();
         }
         applyHighlights();
-        brief("已划线");
+        // 不再弹「已划线」提示：灰底高亮本身就是反馈，
+        // 而且提示层是全屏白底，在墨水屏上就是一次白屏闪。
         final Highlights.Item item = it;
         new Thread(new Runnable() {
             @Override

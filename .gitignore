@@ -11,3 +11,7 @@ __pycache__/
 # 设备偏好设置导出：里面是登录会话，只在本地调试用
 prefs.xml
 *.prefs.xml
+
+# 调试截图
+probe*.png
+shot*.png

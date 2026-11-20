@@ -58,8 +58,7 @@ public class MainActivity extends Activity {
     private View headerActionWrap;
     private View headerSettings;
     private TextView shelfStats;
-    private TextView loadingView;
-    private TextView emptyView;
+    private ShelfStatusView statusView;
 
     private View shelfPage;
     private View discoverPage;
@@ -318,15 +317,13 @@ public class MainActivity extends Activity {
         sv.addView(grid, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        loadingView = Ui.text(this, "正在同步书架…", 14, Ui.LIGHT);
-        loadingView.setGravity(Gravity.CENTER);
-        loadingView.setPadding(0, dp(60), 0, dp(20));
-
-        emptyView = Ui.text(this, "书架是空的\n去手机上的微信读书加几本吧", 13.5f, Ui.LIGHT);
-        emptyView.setGravity(Gravity.CENTER);
-        emptyView.setLineSpacing(dp(5), 1f);
-        emptyView.setPadding(0, dp(60), 0, dp(20));
-        emptyView.setVisibility(View.GONE);
+        statusView = new ShelfStatusView(this, new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                loadShelf(false);
+            }
+        });
+        statusView.setVisibility(View.GONE);
 
         page.addView(sv, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
@@ -1047,10 +1044,9 @@ public class MainActivity extends Activity {
             // 先把本地导入的书摆出来：云端拉不动也不该让用户以为书没了
             mergeLocal();
             if (books.isEmpty()) {
-                loadingView.setVisibility(View.VISIBLE);
-                emptyView.setVisibility(View.GONE);
+                statusView.showLoading();
                 if (grid.getChildCount() == 0) {
-                    grid.addView(loadingView, new LinearLayout.LayoutParams(
+                    grid.addView(statusView, new LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
                 }
             } else {
@@ -1091,9 +1087,8 @@ public class MainActivity extends Activity {
                             mergeLocal();
                             if (books.isEmpty()) {
                                 grid.removeAllViews();
-                                emptyView.setText("书架同步失败\n" + hint);
-                                emptyView.setVisibility(View.VISIBLE);
-                                grid.addView(emptyView, new LinearLayout.LayoutParams(
+                                statusView.showError(hint);
+                                grid.addView(statusView, new LinearLayout.LayoutParams(
                                         ViewGroup.LayoutParams.MATCH_PARENT,
                                         ViewGroup.LayoutParams.WRAP_CONTENT));
                             } else {
@@ -1162,7 +1157,6 @@ public class MainActivity extends Activity {
     private void rebuildGrid() {
         grid.removeAllViews();
         cells.clear();
-        loadingView.setVisibility(View.GONE);
 
         // 计数放在空书架判断之前，否则删完最后一本时底部还留着旧数字
         if (shelfStats != null) {
@@ -1171,13 +1165,11 @@ public class MainActivity extends Activity {
         }
 
         if (books.isEmpty()) {
-            emptyView.setText("书架是空的\n去手机上的微信读书加几本吧");
-            emptyView.setVisibility(View.VISIBLE);
-            grid.addView(emptyView, new LinearLayout.LayoutParams(
+            statusView.showEmpty();
+            grid.addView(statusView, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             return;
         }
-        emptyView.setVisibility(View.GONE);
 
         int width = getResources().getDisplayMetrics().widthPixels;
         int pad = dp(14);

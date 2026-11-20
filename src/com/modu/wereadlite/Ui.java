@@ -5,14 +5,15 @@ import android.graphics.drawable.GradientDrawable;
 import android.util.TypedValue;
 import android.widget.TextView;
 
-/** 极简配色与控件工厂：墨水屏只有黑白灰，不用任何主题色。 */
+/** 极简配色与控件工厂：墨水屏只有黑白灰，不用任何主题色。
+ *  灰阶刻度对齐微信读书墨水屏官方 8 级色板（从官方客户端还原）。 */
 final class Ui {
 
-    static final int INK = 0xFF111111;
-    static final int SUB = 0xFF555555;
-    static final int LIGHT = 0xFF9A9A9A;
-    static final int LINE = 0xFFDCDCDC;
-    static final int TILE = 0xFFF5F5F5;
+    static final int INK = 0xFF212832;   // 主文字/图标，官方最深墨色
+    static final int SUB = 0xFF595959;   // 次要文字
+    static final int LIGHT = 0xFFA0A0A0; // 弱化文字
+    static final int LINE = 0xFFE0E0E0;  // 分割线
+    static final int TILE = 0xFFF2F2F2;  // 卡片/按钮底色
     static final String APP_NAME = "微读lite";
 
     private Ui() {
